@@ -1,0 +1,31 @@
+---
+interface Props {
+  type?: 'info' | 'tip' | 'warn';
+  title?: string;
+}
+
+const { type = 'info', title } = Astro.props;
+
+const variants = {
+  info: { icon: 'ℹ️', box: 'bg-[#eef4fb] border-[#c9ddf2]', heading: 'text-[#1d4e7e]' },
+  tip: { icon: '💡', box: 'bg-[#eefaf2] border-[#c6ead2]', heading: 'text-[#1e6b40]' },
+  warn: { icon: '⚠️', box: 'bg-[#fdf3e7] border-[#f3ddbd]', heading: 'text-[#8a5310]' },
+};
+const v = variants[type];
+---
+
+<div class={`callout border rounded-lg px-4 py-3 my-3 text-[.9rem] leading-normal ${v.box}`}>
+  {title && <div class={`font-bold mb-1 ${v.heading}`}>{v.icon} {title}</div>}
+  <slot />
+</div>
+
+<style>
+  /* Callout content is compact: kill the default list/paragraph chrome */
+  .callout :global(p) {
+    margin: 0;
+  }
+  .callout :global(ul > li) {
+    border-bottom: none;
+    padding: 2px 0;
+  }
+</style>

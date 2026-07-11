@@ -1,0 +1,290 @@
+---
+title: Apache Kafka
+description: Publish. Subscribe. Stream. — distributed event streaming with Spring Boot
+category: Messaging
+tags: [streaming, spring-boot, event-driven]
+updated: 2026-07-11
+links:
+  - label: Kafka Docs
+    href: https://kafka.apache.org/documentation/
+  - label: Spring Kafka Docs
+    href: https://docs.spring.io/spring-kafka/docs/current/reference/html/
+---
+
+import Callout from '../../components/ui/Callout.astro';
+import PartitionSimulator from '../../components/viz/kafka/PartitionSimulator.tsx';
+
+**What is Apache Kafka?** A distributed event streaming platform used for building real-time data pipelines and streaming applications. **Key features:** High Throughput, Fault Tolerance, Scalability, Durability, Real-time Processing.
+
+## Core Concepts
+
+- **Producer** — Sends records to a Kafka topic.
+- **Consumer** — Reads records from a Kafka topic.
+- **Topic** — A category/feed name to which records are published.
+- **Partition** — A topic is divided into multiple partitions for parallelism.
+- **Broker** — Kafka server that stores data and handles requests.
+- **Consumer Group** — A group of consumers that work together to consume from a topic.
+- **Offset** — A unique ID of a record in a partition.
+
+## Kafka Architecture
+
+<div class="flex items-center justify-between gap-3.5 flex-wrap mb-3.5">
+  <div class="bg-panel-soft border border-line rounded-[10px] px-4.5 py-3.5 text-center text-[.85rem] min-w-[120px]">Producer</div>
+  <div class="text-[.78rem] text-sub text-center">— publish →</div>
+  <div class="bg-accent-soft border border-accent-line rounded-[10px] px-4.5 py-3.5 text-center text-[.85rem] min-w-[120px]">
+    Kafka Cluster
+    <div class="flex flex-col gap-1.5 mt-2">
+      <div class="bg-white border border-line rounded-md px-2.5 py-1 text-[.78rem]">Broker 1</div>
+      <div class="bg-white border border-line rounded-md px-2.5 py-1 text-[.78rem]">Broker 2</div>
+      <div class="bg-white border border-line rounded-md px-2.5 py-1 text-[.78rem]">Broker 3</div>
+    </div>
+  </div>
+  <div class="text-[.78rem] text-sub text-center">— consume →</div>
+  <div class="bg-panel-soft border border-line rounded-[10px] px-4.5 py-3.5 text-center text-[.85rem] min-w-[120px]">Consumer Group</div>
+</div>
+
+The Kafka Cluster coordinates with **Zookeeper** (or **KRaft** in newer versions) for cluster metadata and leader election.
+
+## Topics & Partitions — Interactive
+
+Topic `orders` below has 3 partitions. Produce messages and watch the routing: `partition = hash(key) % numPartitions`. Add or remove consumers to trigger a **group rebalance**.
+
+<PartitionSimulator client:visible />
+
+<ul class="checks">
+  <li>Each partition is ordered and immutable — offsets only grow.</li>
+  <li>The same key always lands on the same partition → per-key ordering.</li>
+  <li>Partitions enable parallelism: at most one consumer per partition within a group.</li>
+  <li>More consumers than partitions → extra consumers sit idle.</li>
+  <li>Lag = latest offset − committed offset; the consumer group works it down.</li>
+</ul>
+
+## Add Kafka Dependency (Maven)
+
+```xml title="pom.xml"
+<dependency>
+    <groupId>org.springframework.kafka</groupId>
+    <artifactId>spring-kafka</artifactId>
+</dependency>
+```
+
+## Application Properties
+
+```properties title="application.properties"
+spring.kafka.bootstrap-servers=localhost:9092
+
+# Producer
+spring.kafka.producer.key-serializer=\
+    org.apache.kafka.common.serialization.StringSerializer
+spring.kafka.producer.value-serializer=\
+    org.springframework.kafka.support.serializer.JsonSerializer
+
+# Consumer
+spring.kafka.consumer.group-id=my-group
+spring.kafka.consumer.auto-offset-reset=earliest
+spring.kafka.consumer.key-deserializer=\
+    org.apache.kafka.common.serialization.StringDeserializer
+spring.kafka.consumer.value-deserializer=\
+    org.springframework.kafka.support.serializer.JsonDeserializer
+spring.kafka.consumer.properties.spring.json.trusted.packages=*
+```
+
+## Producer Example
+
+### 1. Producer Config
+
+```java title="KafkaProducerConfig.java"
+@Configuration
+public class KafkaProducerConfig {
+
+    @Bean
+    public ProducerFactory<String, Order> producerFactory() {
+        Map<String, Object> config = new HashMap<>();
+        config.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
+        config.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG,
+            StringSerializer.class);
+        config.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG,
+            JsonSerializer.class);
+        return new DefaultKafkaProducerFactory<>(config);
+    }
+
+    @Bean
+    public KafkaTemplate<String, Order> kafkaTemplate() {
+        return new KafkaTemplate<>(producerFactory());
+    }
+}
+```
+
+### 2. Send Message
+
+```java title="OrderProducer.java"
+@Service
+public class OrderProducer {
+
+    @Autowired
+    private KafkaTemplate<String, Order> kafkaTemplate;
+
+    public void sendOrder(Order order) {
+        kafkaTemplate.send("orders", order);
+    }
+}
+```
+
+## Consumer Example
+
+### 1. Consumer Config
+
+```java title="KafkaConsumerConfig.java"
+@Configuration
+public class KafkaConsumerConfig {
+
+    @Bean
+    public ConsumerFactory<String, Order> consumerFactory() {
+        Map<String, Object> config = new HashMap<>();
+        config.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
+        config.put(ConsumerConfig.GROUP_ID_CONFIG, "my-group");
+        config.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG,
+            StringDeserializer.class);
+        config.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG,
+            JsonDeserializer.class);
+        return new DefaultKafkaConsumerFactory<>(config,
+            new StringDeserializer(), new JsonDeserializer<>(Order.class));
+    }
+}
+```
+
+### 2. Listen to Messages
+
+```java title="OrderConsumer.java"
+@Service
+public class OrderConsumer {
+
+    @KafkaListener(topics = "orders", groupId = "my-group")
+    public void consume(Order order) {
+        System.out.println("Received Order: " + order);
+    }
+}
+```
+
+## Kafka Annotations
+
+- **@EnableKafka** — Enables Kafka support in a Spring Boot application.
+- **@KafkaListener** — Marks a method to listen to messages from a topic.
+- **@KafkaHandler** — Used with `@KafkaListener` for multiple methods.
+- **@SendTo** — Sends the result of a `@KafkaListener` method to a topic.
+- **@Payload** — Binds the message payload to a method parameter.
+
+## Partitions, Replication & Offsets
+
+- **Partitions** — Improve scalability and parallelism.
+- **Replication** — Each partition can be replicated across brokers for fault tolerance.
+- **Leader** — Each partition has a leader that handles reads/writes.
+- **Follower** — Replicas that sync data from the leader.
+- **Offset** — Unique ID of a message in a partition.
+- **Consumer Offset** — Committed offset of the last processed message.
+
+## Common Kafka Operations (CLI)
+
+```bash
+# Create Topic
+kafka-topics.sh --create --topic orders --bootstrap-server localhost:9092 \
+  --partitions 3 --replication-factor 1
+
+# List Topics
+kafka-topics.sh --list --bootstrap-server localhost:9092
+
+# Describe Topic
+kafka-topics.sh --describe --topic orders --bootstrap-server localhost:9092
+
+# Produce Message
+kafka-console-producer.sh --topic orders --bootstrap-server localhost:9092
+
+# Consume Message
+kafka-console-consumer.sh --topic orders --bootstrap-server localhost:9092 \
+  --from-beginning
+```
+
+## Use Cases
+
+<ul class="plain">
+  <li>Real-time Data Streaming</li>
+  <li>Log Aggregation</li>
+  <li>Event-Driven Architecture</li>
+  <li>Microservices Communication</li>
+  <li>Activity Tracking</li>
+  <li>Monitoring & Alerts</li>
+</ul>
+
+## Error Handling
+
+<ul class="plain">
+  <li>Use try-catch in producer & consumer.</li>
+  <li>Retry mechanism with spring-retry.</li>
+  <li>Dead Letter Topic (DLT) for failed messages.</li>
+  <li>Use <code>@Recover</code> with <code>@KafkaListener</code> for fallback.</li>
+</ul>
+
+```java
+@Recover
+public void recover(Exception ex, Order order) {
+    // handle failed message
+}
+```
+
+<Callout type="tip" title="Rule of thumb">
+  Retry transient failures (network, timeouts) a bounded number of times, then park the
+  message in a Dead Letter Topic so one poison message never blocks the partition.
+</Callout>
+
+## Producer Acks
+
+| acks | Description |
+| --- | --- |
+| `0` | Producer doesn't wait for ack. |
+| `1` | Leader writes successfully. |
+| `all (-1)` | Waits for all in-sync replicas (safe). |
+
+## Serialization
+
+| Type | Serializer / Deserializer |
+| --- | --- |
+| String | StringSerializer / StringDeserializer |
+| JSON | JsonSerializer / JsonDeserializer |
+| Avro | KafkaAvroSerializer / KafkaAvroDeserializer |
+| Byte Array | ByteArraySerializer / ByteArrayDeserializer |
+
+## Best Practices
+
+<ul class="checks">
+  <li>Use meaningful topic names.</li>
+  <li>Choose the proper number of partitions.</li>
+  <li>Keep messages small.</li>
+  <li>Enable compression (performance).</li>
+  <li>Monitor lag and throughput.</li>
+  <li>Use idempotent producer for reliability.</li>
+  <li>Handle failures gracefully.</li>
+  <li>Remove unused consumer groups.</li>
+</ul>
+
+## Monitoring Tools
+
+<ul class="plain">
+  <li>Kafka Manager</li>
+  <li>Confluent Control Center</li>
+  <li>Prometheus + Grafana</li>
+  <li>Kafdrop</li>
+  <li>Burrow (Lag monitoring)</li>
+</ul>
+
+## Interview Questions
+
+1. What is Apache Kafka?
+2. Explain Kafka architecture.
+3. What is a topic, partition and offset?
+4. How does a consumer group work?
+5. What is the difference between Kafka and RabbitMQ?
+6. What are acks in Kafka?
+7. How does Kafka ensure fault tolerance?
+8. What is ISR in Kafka?
+9. How to handle message ordering?
+10. How to achieve exactly-once processing?

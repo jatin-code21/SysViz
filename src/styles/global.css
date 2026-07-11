@@ -1,0 +1,197 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #0f1115;
+  --color-panel: #ffffff;
+  --color-panel-soft: #f6f4ef;
+  --color-ink: #1a1d23;
+  --color-sub: #5c6270;
+  --color-accent: #ff6a3d;
+  --color-accent-soft: #fff2ec;
+  --color-accent-line: #ffd7c4;
+  --color-accent-ink: #7a2e13;
+  --color-line: #e6e3dd;
+  --color-nav: #14161b;
+  --color-nav-hover: #22252c;
+  --color-nav-ink: #cfd3da;
+  --color-nav-muted: #8a8f99;
+  --color-hero-ink: #b8bcc4;
+  --color-ok: #2f9e63;
+
+  --font-sans: "Segoe UI", "Helvetica Neue", ui-sans-serif, system-ui, Arial, sans-serif;
+  --font-mono: "Fira Code", "Consolas", ui-monospace, SFMono-Regular, monospace;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+/* ---------------------------------------------------------------------------
+ * Concept page prose — styles the HTML that MDX emits, so cheatsheet authors
+ * only write markdown. Each `##` section is wrapped in <section class=
+ * "concept-section"> by plugins/rehype-sections.mjs.
+ * ------------------------------------------------------------------------- */
+
+.concept-prose {
+  counter-reset: section;
+}
+
+/* Loose content before the first ## heading becomes the intro box */
+.concept-prose > :not(section):not(astro-island) {
+  background: var(--color-panel);
+  border-radius: 12px;
+  padding: 18px 22px;
+  margin-bottom: 22px;
+  font-size: 0.92rem;
+  line-height: 1.55;
+}
+.concept-prose > :not(section) strong {
+  color: var(--color-accent-ink);
+}
+
+.concept-section {
+  background: var(--color-panel);
+  border-radius: 12px;
+  padding: 26px 30px;
+  margin-bottom: 22px;
+  counter-increment: section;
+}
+
+.concept-section h2 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 1.1rem;
+  font-weight: 700;
+  margin: 0 0 16px;
+  border-bottom: 2px solid var(--color-accent);
+  padding-bottom: 10px;
+  scroll-margin-top: 20px;
+}
+.concept-section h2::before {
+  content: counter(section);
+  background: var(--color-accent);
+  color: #fff;
+  font-size: 0.8rem;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.concept-section h3 {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--color-accent-ink);
+  margin: 18px 0 8px;
+}
+
+.concept-section p {
+  font-size: 0.92rem;
+  line-height: 1.55;
+  margin: 10px 0;
+}
+
+.concept-section a {
+  color: var(--color-accent);
+  text-decoration: none;
+}
+.concept-section a:hover {
+  text-decoration: underline;
+}
+
+/* Default list: definition-style rows like the reference concept-list */
+.concept-section ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.concept-section ul > li {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--color-line);
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+.concept-section ul > li:last-child {
+  border-bottom: none;
+}
+.concept-section li strong {
+  color: var(--color-accent-ink);
+}
+
+/* Plain bullet list opt-in: <ul class="plain"> */
+.concept-section ul.plain {
+  padding-left: 20px;
+  list-style: disc;
+}
+.concept-section ul.plain > li {
+  border-bottom: none;
+  padding: 2px 0;
+  line-height: 1.7;
+}
+
+/* Checkmark list opt-in: <ul class="checks"> */
+.concept-section ul.checks > li {
+  border-bottom: none;
+  padding: 4px 0;
+  font-size: 0.88rem;
+}
+.concept-section ul.checks > li::before {
+  content: "✓ ";
+  color: var(--color-ok);
+  font-weight: 700;
+}
+
+.concept-section ol {
+  padding-left: 20px;
+  margin: 0;
+  font-size: 0.92rem;
+  line-height: 1.7;
+}
+
+.concept-section table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+  margin-top: 6px;
+}
+.concept-section th,
+.concept-section td {
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--color-line);
+}
+.concept-section th {
+  color: var(--color-accent-ink);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.concept-section :not(pre) > code {
+  background: #f0eee8;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--color-accent-ink);
+}
+
+.concept-section .expressive-code {
+  margin: 12px 0;
+}
+
+/* Two-column section pairing: wrap two short sections in <div class="grid2"> */
+.concept-prose .grid2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+@media (max-width: 800px) {
+  .concept-prose .grid2 {
+    grid-template-columns: 1fr;
+  }
+}

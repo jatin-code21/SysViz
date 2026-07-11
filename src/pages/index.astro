@@ -1,0 +1,44 @@
+---
+import { getCollection, render } from 'astro:content';
+import BaseLayout from '../layouts/BaseLayout.astro';
+import ConceptExplorer, { type ConceptMeta } from '../components/ConceptExplorer.tsx';
+
+const entries = await getCollection('concepts');
+
+const concepts: ConceptMeta[] = await Promise.all(
+  entries.map(async (entry) => {
+    const { headings } = await render(entry);
+    return {
+      slug: entry.id,
+      title: entry.data.title,
+      description: entry.data.description,
+      category: entry.data.category,
+      tags: entry.data.tags,
+      updated: entry.data.updated.toLocaleDateString('en-GB', {
+        day: 'numeric',
+        month: 'short',
+        year: 'numeric',
+      }),
+      sections: headings.filter((h) => h.depth === 2).map((h) => h.text),
+    };
+  }),
+);
+
+const base = import.meta.env.BASE_URL;
+---
+
+<BaseLayout title="SysViz — Concept Cheatsheets">
+  <main class="max-w-[1080px] mx-auto px-5 py-10 md:py-16">
+    <header class="mb-8">
+      <div class="text-white font-bold text-2xl tracking-[.5px]">
+        Sys<span class="text-accent">Viz</span>
+      </div>
+      <p class="text-hero-ink mt-1.5 max-w-xl">
+        Personal cheatsheets for backend concepts — structured, visual, and quick to recall.
+        One page per concept; it grows as I learn.
+      </p>
+    </header>
+
+    <ConceptExplorer client:load concepts={concepts} base={base} />
+  </main>
+</BaseLayout>
