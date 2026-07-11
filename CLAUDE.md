@@ -40,10 +40,14 @@ Body conventions (see `src/content/concepts/kafka.mdx` as the reference):
 - Interactive visualizations: React component under `src/components/viz/<concept>/`,
   embedded with `<MyViz client:visible />`. Build one wherever a concept has dynamic
   behavior worth simulating (see `viz/kafka/PartitionSimulator.tsx` for the style:
-  dark `#1a1d23` container, status line explaining each action, small controls).
+  `#0f0f14` container with `#26262e` border, status line explaining each action,
+  small controls).
 
-Theme tokens live in `@theme` in `src/styles/global.css` (accent `#ff6a3d`, bg
-`#0f1115`, panels white).
+Theme: modern dark ("Linear/Vercel docs" direction, user-chosen) — tokens in `@theme`
+in `src/styles/global.css`: bg `#0a0a0c`, cards `#131318` with `#26262e` borders,
+indigo accent `#7c6cff`, Inter + JetBrains Mono (self-hosted via @fontsource-variable).
+No white/light surfaces; new components should use the existing token classes
+(`bg-panel`, `border-line`, `text-accent-ink`, …) rather than hardcoded colors.
 
 ## Verify
 

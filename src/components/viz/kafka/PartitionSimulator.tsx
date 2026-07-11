@@ -9,7 +9,7 @@ import { useEffect, useRef, useState } from 'react';
 const NUM_PARTITIONS = 3;
 const MAX_CONSUMERS = 4;
 const PRESET_KEYS = ['user-42', 'user-7', 'order-99', 'cart-13', 'pay-5'];
-const CONSUMER_COLORS = ['#ff6a3d', '#4f9cf9', '#2f9e63', '#c777f2'];
+const CONSUMER_COLORS = ['#7c6cff', '#38bdf8', '#34d399', '#fbbf24'];
 const VISIBLE_CELLS = 10;
 const CONSUME_INTERVAL_MS = 900;
 
@@ -112,12 +112,12 @@ export default function PartitionSimulator() {
   };
 
   const btn =
-    'text-xs font-semibold rounded-md px-3 py-1.5 bg-[#2a2e37] text-[#e9ecf1] hover:bg-[#363b47] cursor-pointer transition-colors';
+    'text-xs font-semibold rounded-md px-3 py-1.5 bg-[#1c1c23] text-[#e6e6eb] hover:bg-[#262630] cursor-pointer transition-colors';
 
   return (
-    <div className="not-prose bg-[#1a1d23] text-[#e9ecf1] rounded-xl p-4 md:p-5 my-3 font-mono text-sm">
+    <div className="not-prose bg-[#0f0f14] border border-[#26262e] text-[#e6e6eb] rounded-xl p-4 md:p-5 my-3 font-mono text-sm">
       {/* status line */}
-      <div className="text-[#8fd3a4] text-xs leading-relaxed min-h-8 mb-3 whitespace-pre-wrap">
+      <div className="text-[#6ee7b7] text-xs leading-relaxed min-h-8 mb-3 whitespace-pre-wrap">
         ▸ {event}
       </div>
 
@@ -138,15 +138,15 @@ export default function PartitionSimulator() {
             }
           }}
           placeholder="custom key ⏎"
-          className="text-xs bg-[#0f1115] border border-[#2a2e37] rounded-md px-2.5 py-1.5 w-28 outline-none focus:border-[#ff6a3d] placeholder-[#5c6270]"
+          className="text-xs bg-[#0a0a0c] border border-[#26262e] rounded-md px-2.5 py-1.5 w-28 outline-none focus:border-[#7c6cff] placeholder-[#5c6270]"
         />
-        <span className="w-px h-5 bg-[#2a2e37] mx-1" />
+        <span className="w-px h-5 bg-[#26262e] mx-1" />
         <button type="button" className={btn} onClick={() => produceRandom(5)}>+5 random</button>
         <button type="button" className={btn} onClick={() => changeConsumers(1)}>+ consumer</button>
         <button type="button" className={btn} onClick={() => changeConsumers(-1)}>− consumer</button>
         <button
           type="button"
-          className={`${btn} ${auto ? 'text-[#8fd3a4]' : 'text-[#8a8f99]'}`}
+          className={`${btn} ${auto ? 'text-[#6ee7b7]' : 'text-[#8a8f99]'}`}
           onClick={() => setAuto(!auto)}
         >
           auto-consume: {auto ? 'ON' : 'OFF'}
@@ -178,7 +178,7 @@ export default function PartitionSimulator() {
                     <span
                       key={m.offset}
                       title={`key=${m.key}, offset=${m.offset}${consumed ? ' (committed)' : ''}`}
-                      className={`shrink-0 w-7 h-7 rounded flex items-center justify-center text-[11px] font-bold text-[#1a1d23] ${consumed ? 'opacity-30' : ''} ${isNext ? 'ring-2 ring-white' : ''}`}
+                      className={`shrink-0 w-7 h-7 rounded flex items-center justify-center text-[11px] font-bold text-[#0f0f14] ${consumed ? 'opacity-30' : ''} ${isNext ? 'ring-2 ring-white' : ''}`}
                       style={{ background: keyColor(m.key) }}
                     >
                       {m.offset}
@@ -196,7 +196,7 @@ export default function PartitionSimulator() {
       </div>
 
       {/* consumer group */}
-      <div className="flex flex-wrap items-center gap-2 border-t border-[#2a2e37] pt-3">
+      <div className="flex flex-wrap items-center gap-2 border-t border-[#26262e] pt-3">
         <span className="text-[11px] text-[#8a8f99]">group “order-service”:</span>
         {Array.from({ length: consumerCount }, (_, c) => {
           const owned = [0, 1, 2].filter((p) => ownerOf(p, consumerCount) === c);

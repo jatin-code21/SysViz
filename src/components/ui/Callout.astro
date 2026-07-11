@@ -7,9 +7,21 @@ interface Props {
 const { type = 'info', title } = Astro.props;
 
 const variants = {
-  info: { icon: 'ℹ️', box: 'bg-[#eef4fb] border-[#c9ddf2]', heading: 'text-[#1d4e7e]' },
-  tip: { icon: '💡', box: 'bg-[#eefaf2] border-[#c6ead2]', heading: 'text-[#1e6b40]' },
-  warn: { icon: '⚠️', box: 'bg-[#fdf3e7] border-[#f3ddbd]', heading: 'text-[#8a5310]' },
+  info: {
+    icon: 'ℹ️',
+    box: 'bg-[rgba(56,189,248,.08)] border-[rgba(56,189,248,.3)]',
+    heading: 'text-[#7dd3fc]',
+  },
+  tip: {
+    icon: '💡',
+    box: 'bg-[rgba(52,211,153,.08)] border-[rgba(52,211,153,.3)]',
+    heading: 'text-[#6ee7b7]',
+  },
+  warn: {
+    icon: '⚠️',
+    box: 'bg-[rgba(251,191,36,.08)] border-[rgba(251,191,36,.3)]',
+    heading: 'text-[#fcd34d]',
+  },
 };
 const v = variants[type];
 ---
