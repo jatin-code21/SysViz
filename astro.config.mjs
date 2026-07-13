@@ -13,9 +13,18 @@ export default defineConfig({
     expressiveCode({
       themes: ['github-dark'],
       styleOverrides: {
-        borderRadius: '8px',
-        codeFontFamily: '"Fira Code", "Consolas", monospace',
+        borderRadius: '10px',
+        borderColor: '#26262e',
+        codeFontFamily: '"JetBrains Mono Variable", "Fira Code", monospace',
         codeFontSize: '0.82rem',
+        codeBackground: '#0f0f14',
+        frames: {
+          editorActiveTabBackground: '#0f0f14',
+          editorTabBarBackground: '#131318',
+          terminalBackground: '#0f0f14',
+          terminalTitlebarBackground: '#131318',
+          shadowColor: 'transparent',
+        },
       },
     }),
     mdx(),

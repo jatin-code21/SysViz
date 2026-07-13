@@ -1,25 +1,28 @@
 @import "tailwindcss";
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/jetbrains-mono";
 
 @theme {
-  --color-bg: #0f1115;
-  --color-panel: #ffffff;
-  --color-panel-soft: #f6f4ef;
-  --color-ink: #1a1d23;
-  --color-sub: #5c6270;
-  --color-accent: #ff6a3d;
-  --color-accent-soft: #fff2ec;
-  --color-accent-line: #ffd7c4;
-  --color-accent-ink: #7a2e13;
-  --color-line: #e6e3dd;
-  --color-nav: #14161b;
-  --color-nav-hover: #22252c;
-  --color-nav-ink: #cfd3da;
-  --color-nav-muted: #8a8f99;
-  --color-hero-ink: #b8bcc4;
-  --color-ok: #2f9e63;
+  /* Modern dark theme: near-black bg, elevated bordered cards, indigo accent */
+  --color-bg: #0a0a0c;
+  --color-panel: #131318;
+  --color-panel-soft: #1a1a21;
+  --color-ink: #e6e6eb;
+  --color-sub: #8b8b96;
+  --color-accent: #7c6cff;
+  --color-accent-ink: #a89dff;
+  --color-accent-soft: rgba(124, 108, 255, 0.12);
+  --color-accent-line: rgba(124, 108, 255, 0.35);
+  --color-line: #26262e;
+  --color-nav: #0c0c0f;
+  --color-nav-hover: #1c1c23;
+  --color-nav-ink: #b9b9c3;
+  --color-nav-muted: #6f6f7a;
+  --color-hero-ink: #a3a3ad;
+  --color-ok: #34d399;
 
-  --font-sans: "Segoe UI", "Helvetica Neue", ui-sans-serif, system-ui, Arial, sans-serif;
-  --font-mono: "Fira Code", "Consolas", ui-monospace, SFMono-Regular, monospace;
+  --font-sans: "Inter Variable", "Segoe UI", ui-sans-serif, system-ui, Arial, sans-serif;
+  --font-mono: "JetBrains Mono Variable", "Fira Code", ui-monospace, SFMono-Regular, monospace;
 }
 
 html {
@@ -39,11 +42,13 @@ html {
 /* Loose content before the first ## heading becomes the intro box */
 .concept-prose > :not(section):not(astro-island) {
   background: var(--color-panel);
+  border: 1px solid var(--color-line);
   border-radius: 12px;
   padding: 18px 22px;
   margin-bottom: 22px;
   font-size: 0.92rem;
-  line-height: 1.55;
+  line-height: 1.6;
+  color: var(--color-ink);
 }
 .concept-prose > :not(section) strong {
   color: var(--color-accent-ink);
@@ -51,6 +56,7 @@ html {
 
 .concept-section {
   background: var(--color-panel);
+  border: 1px solid var(--color-line);
   border-radius: 12px;
   padding: 26px 30px;
   margin-bottom: 22px;
@@ -60,18 +66,22 @@ html {
 .concept-section h2 {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   font-size: 1.1rem;
-  font-weight: 700;
+  font-weight: 650;
+  letter-spacing: -0.01em;
   margin: 0 0 16px;
-  border-bottom: 2px solid var(--color-accent);
-  padding-bottom: 10px;
+  color: #fff;
+  border-bottom: 1px solid var(--color-line);
+  padding-bottom: 12px;
   scroll-margin-top: 20px;
 }
 .concept-section h2::before {
   content: counter(section);
-  background: var(--color-accent);
-  color: #fff;
+  background: var(--color-accent-soft);
+  color: var(--color-accent-ink);
+  border: 1px solid var(--color-accent-line);
+  box-shadow: 0 0 14px rgba(124, 108, 255, 0.25);
   font-size: 0.8rem;
   width: 26px;
   height: 26px;
@@ -84,19 +94,24 @@ html {
 
 .concept-section h3 {
   font-size: 0.9rem;
-  font-weight: 700;
+  font-weight: 650;
   color: var(--color-accent-ink);
   margin: 18px 0 8px;
 }
 
 .concept-section p {
   font-size: 0.92rem;
-  line-height: 1.55;
+  line-height: 1.6;
   margin: 10px 0;
+  color: var(--color-ink);
+}
+
+.concept-section strong {
+  color: #fff;
 }
 
 .concept-section a {
-  color: var(--color-accent);
+  color: var(--color-accent-ink);
   text-decoration: none;
 }
 .concept-section a:hover {
@@ -113,7 +128,7 @@ html {
   padding: 8px 0;
   border-bottom: 1px solid var(--color-line);
   font-size: 0.92rem;
-  line-height: 1.45;
+  line-height: 1.5;
 }
 .concept-section ul > li:last-child {
   border-bottom: none;
@@ -131,6 +146,9 @@ html {
   border-bottom: none;
   padding: 2px 0;
   line-height: 1.7;
+}
+.concept-section ul.plain > li::marker {
+  color: var(--color-accent);
 }
 
 /* Checkmark list opt-in: <ul class="checks"> */
@@ -151,6 +169,9 @@ html {
   font-size: 0.92rem;
   line-height: 1.7;
 }
+.concept-section ol > li::marker {
+  color: var(--color-accent-ink);
+}
 
 .concept-section table {
   width: 100%;
@@ -166,17 +187,18 @@ html {
 }
 .concept-section th {
   color: var(--color-accent-ink);
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   text-transform: uppercase;
-  letter-spacing: 0.4px;
+  letter-spacing: 0.5px;
 }
 
 .concept-section :not(pre) > code {
-  background: #f0eee8;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--color-line);
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: 5px;
   font-family: var(--font-mono);
-  font-size: 0.85rem;
+  font-size: 0.82rem;
   color: var(--color-accent-ink);
 }
 
