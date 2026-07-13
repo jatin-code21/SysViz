@@ -1,0 +1,419 @@
+---
+title: Java ExecutorService
+description: Deep dive — thread pools, ThreadPoolExecutor internals, Futures, shutdown, sizing, and the pitfalls that bite in production
+category: Concurrency
+tags: [java, multithreading, thread-pool, spring-boot]
+updated: 2026-07-14
+links:
+  - label: ExecutorService Javadoc
+    href: https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/ExecutorService.html
+  - label: ThreadPoolExecutor Javadoc
+    href: https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/ThreadPoolExecutor.html
+---
+
+import Callout from '../../components/ui/Callout.astro';
+import ThreadPoolSimulator from '../../components/viz/executor-service/ThreadPoolSimulator.tsx';
+
+**What is ExecutorService?** The core abstraction of Java's executor framework (`java.util.concurrent`, since Java 5): it **decouples task submission from task execution**. You hand it work (`Runnable` / `Callable`); *it* decides which thread runs it, when, and what happens when there are too many tasks. This page is a full deep-dive: internals, lifecycle, sizing, failure modes — not just syntax.
+
+## Why Not Raw Threads?
+
+`new Thread(task).start()` works, and that is exactly the problem — it works until production traffic arrives.
+
+- **Threads are expensive** — each platform thread reserves ~1 MB of stack and costs a system call to create. Creating one per request means paying that price on every request.
+- **Unbounded by design** — nothing stops 10,000 requests from creating 10,000 threads. The OS scheduler thrashes, memory explodes, and the JVM dies with `OutOfMemoryError: unable to create native thread`.
+- **No result, no failure signal** — `Runnable.run()` returns nothing and can't throw checked exceptions. An exception in a bare thread kills that thread silently unless you registered an `UncaughtExceptionHandler`.
+- **No lifecycle management** — no way to say "stop accepting work, finish what's running, then exit cleanly."
+- **No reuse** — the thread dies with its task; the creation cost is never amortized.
+
+The executor framework fixes all five: a **pool of reusable threads**, a **bounded queue** in front of them, **`Future`s** to carry results and exceptions back, and a proper **shutdown protocol**.
+
+<Callout type="info" title="The mental model">
+  An `ExecutorService` is a work queue plus a set of worker threads in a loop: `take task from queue → run it → repeat`. Everything else — pool sizing, rejection, scheduling — is policy around that loop.
+</Callout>
+
+## The Executor Framework Hierarchy
+
+<div class="flex flex-col items-center gap-1.5 mb-4 text-[.82rem]">
+  <div class="bg-panel-soft border border-line rounded-[10px] px-4 py-2 text-center w-72">
+    <strong>Executor</strong>
+    <div class="text-sub text-[.75rem]">one method: <code>execute(Runnable)</code></div>
+  </div>
+  <div class="text-sub">↑ extends</div>
+  <div class="bg-accent-soft border border-accent-line rounded-[10px] px-4 py-2 text-center w-72">
+    <strong>ExecutorService</strong>
+    <div class="text-sub text-[.75rem]">submit / invokeAll / shutdown / Future</div>
+  </div>
+  <div class="text-sub">↑ extends</div>
+  <div class="bg-panel-soft border border-line rounded-[10px] px-4 py-2 text-center w-72">
+    <strong>ScheduledExecutorService</strong>
+    <div class="text-sub text-[.75rem]">delays &amp; periodic execution</div>
+  </div>
+</div>
+
+The main implementations you will actually meet:
+
+- **ThreadPoolExecutor** — *the* implementation. Everything `Executors.newFixedThreadPool(...)` etc. gives you is a `ThreadPoolExecutor` with preset parameters.
+- **ScheduledThreadPoolExecutor** — `ThreadPoolExecutor` subclass adding delayed and periodic tasks (the modern replacement for `Timer`).
+- **ForkJoinPool** — work-stealing pool for divide-and-conquer tasks; also the engine behind parallel streams and default `CompletableFuture` async methods (`ForkJoinPool.commonPool()`).
+- **Virtual-thread-per-task executor** (Java 21) — not a pool at all: a fresh cheap virtual thread per task. See the virtual threads section below.
+
+## ThreadPoolExecutor — The Machine Underneath
+
+Everything important about pool behavior is decided by the seven constructor parameters. Learn these and every factory method becomes obvious:
+
+```java title="ThreadPoolExecutor.java (the full constructor)"
+ThreadPoolExecutor executor = new ThreadPoolExecutor(
+    2,                               // corePoolSize    – threads kept alive even when idle
+    4,                               // maximumPoolSize – hard cap, only reached when queue is FULL
+    60, TimeUnit.SECONDS,            // keepAliveTime   – idle time before an excess thread dies
+    new ArrayBlockingQueue<>(100),   // workQueue       – holds tasks waiting for a thread
+    new CustomThreadFactory("api"),  // threadFactory   – naming, daemon flag, priority
+    new ThreadPoolExecutor.AbortPolicy() // handler     – what to do when saturated
+);
+```
+
+When you call `execute(task)`, the pool follows this exact decision order — this is the single most misunderstood part of the whole API:
+
+1. **Fewer than `corePoolSize` threads running?** → create a **new core thread** for this task, *even if existing threads are idle*. The pool "warms up" to core size lazily.
+2. **Core threads all exist?** → **offer the task to the queue.** If a worker is idle it takes the task immediately; otherwise the task waits.
+3. **Queue full?** → create a **new non-core thread** (up to `maximumPoolSize`) which runs *this* task **immediately — it jumps ahead of everything sitting in the queue.**
+4. **Queue full AND pool at max?** → hand the task to the **`RejectedExecutionHandler`**.
+
+<Callout type="warn" title="The counter-intuitive consequence">
+  With an **unbounded queue** (like `LinkedBlockingQueue` without capacity), step 3 is unreachable — the queue is never "full", so **`maximumPoolSize` is meaningless** and the pool never grows beyond core size. This is exactly how `Executors.newFixedThreadPool()` behaves, and why giving it a big `maximumPoolSize` yourself changes nothing.
+</Callout>
+
+Non-core threads that stay idle longer than `keepAliveTime` are terminated, shrinking the pool back to `corePoolSize` (core threads can also time out if you set `allowCoreThreadTimeOut(true)`).
+
+## Thread Pool in Action — Interactive
+
+The simulator below is a faithful `ThreadPoolExecutor`: watch the decision order from the previous section actually happen. Try this sequence — **submit ×5** with the defaults (core 2, max 4, queue 3), watch task **#6 jump the queue** on a temp worker, then keep submitting until rejection kicks in and compare the four policies.
+
+<ThreadPoolSimulator client:visible />
+
+<ul class="checks">
+  <li>Workers are created lazily — an empty pool spawns core workers one per task.</li>
+  <li>The queue only starts filling once all core workers are busy.</li>
+  <li>Temp (non-core) workers appear only when the queue is <em>full</em> — and their first task skips the queue.</li>
+  <li>Idle temp workers die after <code>keepAliveTime</code>; the pool shrinks back to core size.</li>
+  <li>CallerRuns turns saturation into backpressure: the submitter gets blocked doing the work itself.</li>
+</ul>
+
+## Executors Factory Methods — and Their Traps
+
+`Executors` static factories are convenient presets over `ThreadPoolExecutor`. Each one hides a sharp edge:
+
+| Factory | core / max | Queue | The trap |
+| --- | --- | --- | --- |
+| `newFixedThreadPool(n)` | n / n | Unbounded `LinkedBlockingQueue` | Queue grows forever → **OOM under sustained overload**, latency hides in the queue |
+| `newSingleThreadExecutor()` | 1 / 1 | Unbounded `LinkedBlockingQueue` | Same OOM risk; but guarantees sequential order |
+| `newCachedThreadPool()` | 0 / `Integer.MAX_VALUE` | `SynchronousQueue` (capacity 0) | Pool grows without limit → **thread explosion** under burst load |
+| `newScheduledThreadPool(n)` | n / `Integer.MAX_VALUE` | `DelayedWorkQueue` | Effectively fixed at core size; unbounded queue |
+| `newWorkStealingPool()` | parallelism = #cores | per-thread deques | It's a `ForkJoinPool`: no execution-order guarantees |
+| `newVirtualThreadPerTaskExecutor()` (21+) | — no pool — | — | Cheap threads, but **no concurrency limit** — bound access to scarce resources yourself |
+
+<Callout type="tip" title="Production rule">
+  For anything that takes real traffic, build `ThreadPoolExecutor` yourself with a <strong>bounded queue</strong> and an explicit rejection policy. The factories are fine for scripts, tests, and low-volume background work. (Alibaba's Java style guide outright bans the factories for this reason.)
+</Callout>
+
+Always name your threads — thread dumps full of `pool-3-thread-7` are miserable to debug:
+
+```java title="NamedThreadFactory.java"
+ThreadFactory factory = new ThreadFactory() {
+    private final AtomicInteger n = new AtomicInteger(1);
+    @Override
+    public Thread newThread(Runnable r) {
+        Thread t = new Thread(r, "order-worker-" + n.getAndIncrement());
+        t.setDaemon(false);
+        return t;
+    }
+};
+```
+
+## Submitting Work: execute() vs submit(), Runnable vs Callable
+
+Two task shapes:
+
+- **Runnable** — `void run()`. No result, cannot throw checked exceptions. "Fire and forget."
+- **Callable&lt;V&gt;** — `V call() throws Exception`. Returns a value, may throw. Almost always what you want when you care about the outcome.
+
+Two submission methods, with a crucial difference in failure behavior:
+
+- **`execute(Runnable)`** — from the `Executor` interface. Returns nothing. An uncaught exception propagates to the worker thread's `UncaughtExceptionHandler` (by default: stack trace to stderr, thread dies and is replaced).
+- **`submit(...)`** — returns a `Future`. Any exception is **captured inside the Future** and only re-thrown (wrapped in `ExecutionException`) when you call `get()`. **If you never call `get()`, the exception vanishes silently.**
+
+```java title="SubmitVsExecute.java"
+ExecutorService pool = Executors.newFixedThreadPool(4);
+
+// Runnable via execute — exception hits the UncaughtExceptionHandler
+pool.execute(() -> { throw new IllegalStateException("visible in logs"); });
+
+// Callable via submit — exception is stored in the Future
+Future<BigDecimal> price = pool.submit(() -> pricingClient.fetch("AAPL"));
+
+try {
+    BigDecimal result = price.get(2, TimeUnit.SECONDS);  // blocks, then rethrows
+} catch (ExecutionException e) {
+    log.error("pricing failed", e.getCause());   // the REAL exception is getCause()
+} catch (TimeoutException e) {
+    price.cancel(true);                          // give up and interrupt the task
+}
+```
+
+## Future — Working With Results
+
+A `Future<V>` is a handle to a computation that may not have finished yet:
+
+- **`get()`** — blocks until done; returns the value or throws `ExecutionException` (task failed), `InterruptedException`, or `CancellationException`.
+- **`get(timeout, unit)`** — same, but gives up with `TimeoutException`. **Always prefer this in services** — an unbounded `get()` is a deadlock waiting to happen.
+- **`cancel(mayInterruptIfRunning)`** — `true` interrupts the running thread; `false` only prevents a not-yet-started task from running. Cancellation only works if the task **responds to interruption** (checks `Thread.interrupted()` or calls blocking methods).
+- **`isDone()` / `isCancelled()`** — non-blocking status checks.
+
+Batch coordination helpers on `ExecutorService`:
+
+```java title="InvokeAllAndAny.java"
+List<Callable<Quote>> calls = providers.stream()
+        .map(p -> (Callable<Quote>) () -> p.quote(order))
+        .toList();
+
+// invokeAll: run everything, wait for ALL to finish (or time out)
+List<Future<Quote>> all = pool.invokeAll(calls, 3, TimeUnit.SECONDS);
+
+// invokeAny: return the FIRST successful result, cancel the rest
+Quote fastest = pool.invokeAny(calls);   // great for redundant lookups
+```
+
+<Callout type="info" title="Future vs CompletableFuture">
+  Plain `Future` is pull-based — the only way to get the value is to block on `get()`. `CompletableFuture` adds composition (`thenApply`, `thenCombine`, `exceptionally`) so you can chain work instead of blocking. It deserves its own concept page; here, just know `pool.submit()` gives you the plain kind, while `CompletableFuture.supplyAsync(task, pool)` gives you the composable kind **running on the same executor**.
+</Callout>
+
+## Shutting Down Correctly
+
+An `ExecutorService` keeps non-daemon threads alive — **forget to shut it down and your JVM never exits.** The lifecycle is: *Running → Shutdown (draining) → Terminated*.
+
+- **`shutdown()`** — graceful: stop accepting new tasks (new submits throw `RejectedExecutionException`), but run everything already submitted, including queued tasks.
+- **`shutdownNow()`** — forceful: additionally interrupts running workers and returns the list of tasks that were still queued (so you can log or retry them). Tasks that ignore interruption will still run to completion.
+- **`awaitTermination(timeout, unit)`** — blocks until everything finishes or the timeout hits. **`shutdown()` does not wait** — you almost always want both.
+
+The canonical pattern (straight from the Javadoc):
+
+```java title="GracefulShutdown.java"
+void shutdownAndAwaitTermination(ExecutorService pool) {
+    pool.shutdown();                     // no new tasks
+    try {
+        if (!pool.awaitTermination(30, TimeUnit.SECONDS)) {
+            pool.shutdownNow();          // cancel running tasks
+            if (!pool.awaitTermination(30, TimeUnit.SECONDS))
+                log.error("pool did not terminate");
+        }
+    } catch (InterruptedException ie) {
+        pool.shutdownNow();
+        Thread.currentThread().interrupt();   // preserve interrupt status
+    }
+}
+```
+
+Since **Java 19**, `ExecutorService` implements `AutoCloseable` — `close()` does `shutdown()` + uninterruptible wait, enabling try-with-resources for scoped work:
+
+```java title="TryWithResources.java (Java 19+)"
+try (ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor()) {
+    ids.forEach(id -> pool.submit(() -> enrich(id)));
+}   // blocks here until all tasks finish, then shuts down
+```
+
+## Rejection Policies — When the Pool Says No
+
+Once the queue is full **and** the pool is at `maximumPoolSize`, the `RejectedExecutionHandler` decides the task's fate. Choosing one is choosing your overload behavior:
+
+| Policy | Behavior | Use when |
+| --- | --- | --- |
+| `AbortPolicy` (default) | Throws `RejectedExecutionException` | You want overload to be loud and handled by the caller (fail fast) |
+| `CallerRunsPolicy` | Task runs on the **submitting** thread | You want built-in backpressure — the producer slows itself down |
+| `DiscardPolicy` | Drops the task, **silently** | Task loss is genuinely fine (e.g. refreshing a cache that will refresh again) |
+| `DiscardOldestPolicy` | Drops the queue head, retries the new task | Only the freshest work matters (e.g. latest price tick) |
+
+<Callout type="warn" title="CallerRuns in a web server">
+  `CallerRunsPolicy` on a pool fed by HTTP threads means an overloaded pool makes **request threads** execute the tasks — your web server's own pool then saturates and latency spikes everywhere. It's elegant backpressure for batch pipelines, dangerous as a default in request paths.
+</Callout>
+
+A custom handler is just one method — a common production choice is "log + drop + metric":
+
+```java title="MetricsRejectionHandler.java"
+RejectedExecutionHandler handler = (task, pool) -> {
+    meterRegistry.counter("pool.rejected", "pool", "enrichment").increment();
+    log.warn("rejected task, pool saturated: {}", pool);
+};
+```
+
+## Sizing the Pool
+
+There is no magic number — it depends on what the tasks *do*:
+
+- **CPU-bound** (parsing, compression, computation) — more threads than cores just adds context-switching. Use `cores` or `cores + 1`:
+  `int n = Runtime.getRuntime().availableProcessors();`
+- **I/O-bound** (HTTP calls, DB queries) — threads spend most of their time blocked, so you need more of them. The classic sizing formula (Goetz, *Java Concurrency in Practice*):
+
+  **threads = cores × target utilization × (1 + wait time / compute time)**
+
+  Example: 8 cores, tasks wait 90 ms on a downstream API and compute 10 ms → `8 × 1.0 × (1 + 90/10) = 80` threads.
+- **Mixed workloads** — don't share one pool. **Split pools by task type** (one for CPU work, one per downstream dependency). This also gives you *bulkhead isolation*: a slow payment API can exhaust its own pool without starving everything else.
+- **Then measure** — the formula is a starting point. Watch queue depth, task latency, and rejection count under real load and tune.
+
+<Callout type="tip" title="I/O-bound and on Java 21+?">
+  If the math says you need hundreds of mostly-blocked threads, that's the textbook case for **virtual threads** instead of a bigger pool — see below.
+</Callout>
+
+## Exception Handling — the Silent Killer
+
+The single most common ExecutorService bug in real codebases: **tasks failing silently for weeks.**
+
+- **`submit()` swallows exceptions** — they live inside the returned `Future` and only surface on `get()`. Fire-and-forget via `submit()` = exceptions go nowhere.
+- **`execute()` is louder** — uncaught exceptions reach the thread's `UncaughtExceptionHandler` (default: printed to stderr) and the worker is replaced. Set your own handler via the `ThreadFactory`: `t.setUncaughtExceptionHandler((thread, ex) -> log.error("task died on {}", thread.getName(), ex));`
+- **Belt and braces** — wrap task bodies in try/catch at the edges, exactly like a controller advice: catch, log with context, optionally push to a dead-letter store.
+- **`afterExecute` hook** — `ThreadPoolExecutor` lets you observe every task outcome centrally, including exceptions hidden in `FutureTask`:
+
+```java title="LoggingThreadPool.java"
+ThreadPoolExecutor pool = new ThreadPoolExecutor(4, 4, 0, TimeUnit.SECONDS,
+        new ArrayBlockingQueue<>(500)) {
+    @Override
+    protected void afterExecute(Runnable r, Throwable t) {
+        super.afterExecute(r, t);
+        if (t == null && r instanceof Future<?> f && f.isDone()) {
+            try { f.get(); }                       // surface submit() exceptions
+            catch (ExecutionException e) { t = e.getCause(); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        }
+        if (t != null) log.error("task failed", t);
+    }
+};
+```
+
+## ScheduledExecutorService
+
+Delayed and periodic execution — the modern replacement for `java.util.Timer` (which used a single thread and died entirely on one uncaught exception):
+
+```java title="Scheduling.java"
+ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(2);
+
+// once, after a delay
+scheduler.schedule(() -> sendReminder(user), 30, TimeUnit.MINUTES);
+
+// fixed RATE: aims at t0, t0+60s, t0+120s … runs can pile up if slow
+scheduler.scheduleAtFixedRate(this::pollInbox, 0, 60, TimeUnit.SECONDS);
+
+// fixed DELAY: 60s pause AFTER each run finishes — self-pacing
+scheduler.scheduleWithFixedDelay(this::syncCatalog, 0, 60, TimeUnit.SECONDS);
+```
+
+- **`scheduleAtFixedRate`** — period measured start-to-start. If a run overruns the period, the next run fires immediately after (executions queue up conceptually, they never run concurrently).
+- **`scheduleWithFixedDelay`** — period measured end-to-start. Slow runs just push everything later. Prefer this when the work talks to external systems.
+
+<Callout type="warn" title="The gotcha that kills cron jobs">
+  If a periodic task **throws**, the scheduler silently cancels **all future executions** of that task — no log, no restart. Your "every minute" job runs fine for a month, throws once at 3 AM, and never runs again. Always wrap the body: `try { work(); } catch (Exception e) { log.error("tick failed", e); }`.
+</Callout>
+
+## Spring Boot: @Async and ThreadPoolTaskExecutor
+
+Spring wraps the same machinery. `ThreadPoolTaskExecutor` is a bean-friendly facade over `ThreadPoolExecutor`:
+
+```java title="AsyncConfig.java"
+@Configuration
+@EnableAsync
+public class AsyncConfig {
+
+    @Bean("notificationExecutor")
+    public ThreadPoolTaskExecutor notificationExecutor() {
+        ThreadPoolTaskExecutor ex = new ThreadPoolTaskExecutor();
+        ex.setCorePoolSize(4);
+        ex.setMaxPoolSize(8);
+        ex.setQueueCapacity(200);                 // bounded!
+        ex.setThreadNamePrefix("notif-");
+        ex.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
+        ex.setWaitForTasksToCompleteOnShutdown(true);
+        ex.setAwaitTerminationSeconds(30);
+        return ex;
+    }
+}
+```
+
+```java title="NotificationService.java"
+@Service
+public class NotificationService {
+
+    @Async("notificationExecutor")               // name the pool — don't rely on defaults
+    public CompletableFuture<Void> sendEmail(Order order) {
+        mailClient.send(order);
+        return CompletableFuture.completedFuture(null);
+    }
+}
+```
+
+Things Spring developers learn the hard way:
+
+- **`@Async` needs `@EnableAsync`** and only works on `public` methods called **from another bean** — self-invocation bypasses the proxy and runs synchronously.
+- **Name the executor** in `@Async("...")`. Without your own bean, Spring Boot's default `applicationTaskExecutor` applies (core 8, unbounded queue) — one misbehaving async method can starve every other `@Async` in the app.
+- **Return `CompletableFuture`** (or void). Exceptions in `void` async methods go to an `AsyncUncaughtExceptionHandler`, not to the caller.
+- Same rules as raw pools: bounded queue, named threads, graceful shutdown flags.
+
+## Virtual Threads (Java 21) — When Pools Stop Mattering
+
+Virtual threads invert the fundamental assumption. Platform threads are expensive, so we pool them. Virtual threads cost ~1 KB and are scheduled by the JVM onto a few carrier threads — so **you don't pool them, you create one per task**:
+
+```java title="VirtualThreads.java"
+try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+    List<Future<Report>> futures = customerIds.stream()
+            .map(id -> executor.submit(() -> fetchReport(id)))   // 10,000 tasks? fine.
+            .toList();
+}
+```
+
+- **Use for I/O-bound work** — a blocked virtual thread unmounts from its carrier; blocking becomes nearly free, so the thread-count math from the sizing section disappears.
+- **Not for CPU-bound work** — no speedup; you still only have N cores. Keep a fixed platform pool for computation.
+- **Never pool virtual threads** — pooling defeats them. If you need to **limit concurrency** (e.g. max 10 concurrent calls to a fragile downstream), use a `Semaphore` around the work instead of a pool.
+- **Pinning caveat** — a virtual thread blocking inside a `synchronized` block pins its carrier (largely fixed in Java 24, JEP 491). Prefer `ReentrantLock` in hot paths on 21.
+
+<Callout type="info" title="So is ThreadPoolExecutor obsolete?">
+  No. Virtual threads solve <em>throughput of blocking I/O</em>. Thread pools remain the right tool for CPU-bound parallelism, for capping resource usage, and in every codebase not yet on Java 21. Understanding `ThreadPoolExecutor` also remains interview canon.
+</Callout>
+
+## Common Pitfalls
+
+<ul class="plain">
+  <li><strong>Unbounded queue OOM</strong> — <code>newFixedThreadPool</code> under sustained overload grows its queue until the heap dies. Bound the queue.</li>
+  <li><strong>Silent task failure</strong> — <code>submit()</code> without <code>get()</code> hides every exception. Log at the task edge or in <code>afterExecute</code>.</li>
+  <li><strong>JVM won't exit</strong> — non-daemon pool threads keep the process alive. Shut pools down (or register a shutdown hook).</li>
+  <li><strong>Thread-pool deadlock</strong> — task A blocks on <code>futureB.get()</code> where B is queued behind A in the <em>same</em> bounded pool. Never block a pool thread on work in its own pool.</li>
+  <li><strong><code>ThreadLocal</code> leaks</strong> — pool threads are reused, so ThreadLocals (auth context, MDC, tenant id) leak across tasks. Clear them in <code>finally</code>, or propagate context explicitly.</li>
+  <li><strong>One pool for everything</strong> — a slow dependency starves unrelated work. Split pools per concern (bulkheads).</li>
+  <li><strong>Ignoring interruption</strong> — <code>cancel(true)</code> and <code>shutdownNow()</code> are useless if task loops never check <code>Thread.interrupted()</code>.</li>
+  <li><strong>Swallowing <code>InterruptedException</code></strong> — catching it and doing nothing destroys the signal. Rethrow or call <code>Thread.currentThread().interrupt()</code>.</li>
+</ul>
+
+## Best Practices
+
+<ul class="checks">
+  <li>Build <code>ThreadPoolExecutor</code> explicitly for production paths — bounded queue, deliberate rejection policy.</li>
+  <li>Name threads via a <code>ThreadFactory</code> (or <code>setThreadNamePrefix</code> in Spring).</li>
+  <li>Size by workload: cores(+1) for CPU-bound; Goetz formula or virtual threads for I/O-bound.</li>
+  <li>One pool per concern — isolate slow dependencies (bulkhead pattern).</li>
+  <li>Always use <code>get(timeout)</code>, never bare <code>get()</code>, in request paths.</li>
+  <li>Shutdown protocol everywhere: <code>shutdown()</code> → <code>awaitTermination()</code> → <code>shutdownNow()</code>.</li>
+  <li>Wrap periodic-task bodies in try/catch — one exception cancels the schedule forever.</li>
+  <li>Monitor: <code>getActiveCount()</code>, <code>getQueue().size()</code>, <code>getCompletedTaskCount()</code>, rejection count → dashboards.</li>
+</ul>
+
+## Interview Questions
+
+1. Why use an ExecutorService instead of creating threads directly?
+2. Walk through what happens when you call `execute()` on a ThreadPoolExecutor (the 4-step decision order).
+3. Why does `maximumPoolSize` have no effect with an unbounded queue?
+4. Difference between `execute()` and `submit()` — where does the exception go in each?
+5. `shutdown()` vs `shutdownNow()` vs `awaitTermination()` — what does each guarantee?
+6. Compare the four rejection policies. When is CallerRunsPolicy dangerous?
+7. How do you size a thread pool for CPU-bound vs I/O-bound workloads?
+8. What are the risks of `Executors.newFixedThreadPool` and `newCachedThreadPool` in production?
+9. `scheduleAtFixedRate` vs `scheduleWithFixedDelay` — and what happens if a periodic task throws?
+10. What is thread-pool deadlock and how do you avoid it?
+11. How does `@Async` work in Spring, and why doesn't it fire on self-invocation?
+12. How do virtual threads change thread-pool thinking? When would you still use a platform pool?
