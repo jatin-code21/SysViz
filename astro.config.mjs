@@ -8,6 +8,9 @@ import rehypeSections from './plugins/rehype-sections.mjs';
 
 // https://astro.build/config
 export default defineConfig({
+  // GitHub Pages project site: https://jatin-code21.github.io/SysViz/
+  site: 'https://jatin-code21.github.io',
+  base: '/SysViz/',
   // expressiveCode must be registered before mdx so code blocks in .mdx are processed
   integrations: [
     expressiveCode({
