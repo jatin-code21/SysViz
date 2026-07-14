@@ -1,0 +1,236 @@
+---
+title: HikariCP
+description: "Deep dive — the JDBC connection pool inside your app: internals, sizing, leak detection, and exactly how it differs from PgBouncer"
+category: Databases
+tags: [java, jdbc, connection-pooling, spring-boot, performance]
+updated: 2026-07-15
+links:
+  - label: HikariCP GitHub
+    href: https://github.com/brettwooldridge/HikariCP
+  - label: About Pool Sizing (HikariCP wiki)
+    href: https://github.com/brettwooldridge/HikariCP/wiki/About-Pool-Sizing
+---
+
+import Callout from '../../components/ui/Callout.astro';
+import ConnectionPoolSimulator from '../../components/viz/hikaricp/ConnectionPoolSimulator.tsx';
+
+**What is HikariCP?** The fastest and most widely used **JDBC connection pool** — and the default `DataSource` in Spring Boot since 2.0. It lives *inside your JVM*: your code asks it for a `Connection`, gets a pre-opened one in microseconds, and hands it back on `close()`. This page covers how it works, how to size and debug it, and — since it's constantly confused with PgBouncer — exactly how the two relate and when you need which.
+
+## Why an App-Side Pool at All
+
+Opening a real database connection means TCP handshake + TLS + authentication + server-side session setup — typically **tens of milliseconds**. A query itself often takes less than one.
+
+- **Without a pool** — every request pays connection setup, runs a 1 ms query, and throws the connection away. Your database also churns through backend processes (see the PgBouncer page for why that hurts Postgres specifically).
+- **With a pool** — connections are opened once, kept alive, and *borrowed* per unit of work. `getConnection()` becomes an in-memory operation.
+- **A pool is also a limiter** — it caps how many connections one app instance can ever open, turning a traffic spike into brief queueing instead of a connection storm.
+
+Frameworks assume one: Spring's `DataSource`, JPA/Hibernate, `JdbcTemplate` — all designed around borrow-use-return semantics.
+
+## What HikariCP Is
+
+- **A library, not a process** — a jar inside your app. No extra deployment, no network hop; borrowing a connection costs nanoseconds-to-microseconds.
+- **Obsessively optimized** — the reason it beat the older pools (C3P0, DBCP, Tomcat-pool): a lock-free `ConcurrentBag` with thread-local caching for borrowing, a custom `FastList` instead of `ArrayList` for statement tracking, and bytecode-generated proxies instead of reflection.
+- **Deliberately minimal** — few knobs, safe defaults, and it refuses to implement footguns other pools offered (like unbounded growth).
+- **Database-agnostic** — pools any JDBC driver: Postgres, MySQL, Oracle, SQL Server, H2…
+- **The default in Spring Boot** — `spring-boot-starter-jdbc` / `-data-jpa` bring it in; `spring.datasource.hikari.*` configures it.
+
+## Inside the Pool — How getConnection() Works
+
+What happens when a request thread calls `dataSource.getConnection()`:
+
+1. **Thread-local check** — the `ConcurrentBag` first looks at connections *this thread* recently used; if one is free, it's returned with no contention at all.
+2. **Scan the shared bag** — otherwise, grab any idle connection with a lock-free compare-and-swap.
+3. **Wait on the handoff queue** — pool exhausted? The thread parks. The *next* returned connection is handed directly to the longest waiter.
+4. **Give up** — still nothing after `connectionTimeout` (default 30 s)? Throw `SQLTransientConnectionException: connection is not available`.
+
+Returning is the reverse: `close()` on the proxy doesn't close anything — it resets the connection and offers it to a waiter or back to the bag.
+
+Meanwhile a background **housekeeper** (every 30 s) retires connections past `maxLifetime` or `idleTimeout`, tops the pool back up to `minimumIdle`, and validates connections that have been idle before handing them out (`Connection.isValid()` — no test query needed on modern drivers).
+
+## Pool in Action — Interactive
+
+`maximumPoolSize` below is 3 (`connectionTimeout` shortened to 3 s, `maxLifetime` to 20 s so you can watch them). Try: **burst ×8** — 3 run, 5 queue, and whoever waits past 3 s gets `SQLTransientConnectionException`. Then **leak a conn** and watch the leak-detection warning fire; note the pool now serves everyone with one connection less until you `close()` it.
+
+<ConnectionPoolSimulator client:visible />
+
+<ul class="checks">
+  <li>The pool is pre-filled at startup — connection cost is paid once, not per request.</li>
+  <li>A returned connection goes straight to the longest-waiting thread (handoff), not back to the shelf.</li>
+  <li><code>connectionTimeout</code> converts overload into a fast, explicit exception instead of unbounded blocking.</li>
+  <li>A leaked connection shrinks the working pool forever — leak detection tells you who took it.</li>
+  <li>The age bar: connections are recycled at <code>maxLifetime</code> so you never hold one the database has given up on.</li>
+</ul>
+
+## The Configuration That Matters
+
+| Setting | Default | What it really controls |
+| --- | --- | --- |
+| `maximumPoolSize` | 10 | Hard cap on connections from this app instance. The knob. |
+| `minimumIdle` | = maximumPoolSize | Idle conns kept ready. Leave at default → **fixed-size pool** (recommended). |
+| `connectionTimeout` | 30 s | Max wait in `getConnection()` before `SQLTransientConnectionException`. |
+| `maxLifetime` | 30 min | Retire-and-replace age. **Set a few minutes below any DB/infra idle kill timer.** |
+| `idleTimeout` | 10 min | Only matters if `minimumIdle` &lt; `maximumPoolSize`. |
+| `keepaliveTime` | 0 (off) | Periodic ping on idle conns — enable when firewalls silently drop idle TCP. |
+| `validationTimeout` | 5 s | Budget for the `isValid()` aliveness check. |
+| `leakDetectionThreshold` | 0 (off) | Warn + stack trace when a conn is held longer than this. ~60 s in dev/staging. |
+| `connectionTestQuery` | none | **Leave unset** on any JDBC4 driver — `isValid()` is faster and cleaner. |
+
+<Callout type="warn" title="The maxLifetime handshake">
+  Everything between your app and the database kills idle connections: Postgres <code>idle_session_timeout</code>, MySQL <code>wait_timeout</code>, AWS NLB 350s idle drop, k8s conntrack… If <code>maxLifetime</code> outlives any of them, you'll see random <em>"connection reset"</em> / <em>"broken pipe"</em> errors under low traffic. Keep Hikari's lifetime the <strong>shortest</strong> in the chain.
+</Callout>
+
+## Spring Boot Setup
+
+```properties title="application.properties"
+spring.datasource.url=jdbc:postgresql://db-host:5432/appdb
+spring.datasource.username=app_user
+spring.datasource.password=${DB_PASSWORD}
+
+spring.datasource.hikari.maximum-pool-size=10
+spring.datasource.hikari.connection-timeout=3000
+spring.datasource.hikari.max-lifetime=1740000
+spring.datasource.hikari.keepalive-time=300000
+spring.datasource.hikari.leak-detection-threshold=60000
+spring.datasource.hikari.pool-name=orders-db
+```
+
+Multiple databases? One pool per database, as explicit beans:
+
+```java title="DataSourceConfig.java"
+@Configuration
+public class DataSourceConfig {
+
+    @Bean
+    @ConfigurationProperties("app.datasource.orders")
+    public HikariDataSource ordersDataSource() {
+        return DataSourceBuilder.create().type(HikariDataSource.class).build();
+    }
+
+    @Bean
+    @ConfigurationProperties("app.datasource.analytics")
+    public HikariDataSource analyticsDataSource() {
+        return DataSourceBuilder.create().type(HikariDataSource.class).build();
+    }
+}
+```
+
+Name your pools (`pool-name`) — metrics and leak warnings become instantly readable.
+
+## Pool Sizing — Smaller Than You Think
+
+The most counter-intuitive lesson in the HikariCP wiki: **big pools make things slower.** A database executes queries on its cores; 200 connections against 8 cores just means 192 context-switching bystanders.
+
+- The classic starting formula: **`connections = (core_count × 2) + effective_spindle_count`** — cores of the *database* server. For an 8-core Postgres box: ~17–20. Total. For everything.
+- The famous Oracle benchmark: dropping a pool from 2048 to 96 connections **halved** response times at the same throughput.
+- **10 (the default) is usually right** for one service instance. If threads wait, first ask *why queries are slow*, not how to get more connections.
+- Blocked-on-external-IO inside transactions (the classic anti-pattern) inflates "needed" pool size — fix the transaction boundaries instead.
+- **Sum across instances** — 20 replicas × 10 = 200 connections at the database. This is exactly where an app-side pool stops being enough and the PgBouncer sections below take over.
+
+## Leak Detection & Debugging
+
+A leak = code borrowed a connection and never called `close()`. The pool shrinks silently until `getConnection()` starts timing out — usually in production, under load, at night.
+
+- **Symptom** — `SQLTransientConnectionException: connection is not available, request timed out after 30000ms`, while the database sits idle.
+- **Diagnosis** — set `leakDetectionThreshold=60000`; Hikari logs `Apparent connection leak detected` **with the stack trace of the borrow site**. It's a warning, not an interruption — false positives just mean a legitimately slow operation.
+- **Prevention** — try-with-resources for anything manual (`try (Connection c = ds.getConnection())`); with Spring (`JdbcTemplate`, `@Transactional`, JPA) return-to-pool is managed for you, and leaks usually come from the exotic corners: manual `DataSourceUtils`, streaming result sets, or an `@Transactional` method that never ends.
+- **Watch `hikaricp.connections.active`** — a leak looks like active connections that ratchet up and never come down.
+
+## Monitoring with Micrometer
+
+Spring Boot autowires HikariCP into Micrometer — with actuator you get these for free:
+
+- **`hikaricp.connections.active` / `.idle`** — the live borrow picture.
+- **`hikaricp.connections.pending`** — threads waiting in `getConnection()`. The alert metric: sustained &gt; 0 means the pool (or the queries) can't keep up.
+- **`hikaricp.connections.timeout`** — count of `SQLTransientConnectionException`; any growth is user-visible failure.
+- **`hikaricp.connections.acquire` / `.usage` / `.creation`** — how long borrowing, holding, and opening take. Rising `usage` = queries or transactions got slower.
+
+Same playbook as PgBouncer's `cl_waiting` / `avg_wait_time` — one layer up the stack.
+
+## HikariCP vs PgBouncer — Different Layers
+
+They are **not competitors**. They pool different things in different places — the confusion comes from both being called "connection pools":
+
+| | HikariCP | PgBouncer |
+| --- | --- | --- |
+| What it is | Java library **inside your app's JVM** | Separate **network proxy process** |
+| What it pools | JDBC `Connection` objects | Postgres wire-protocol server connections |
+| Scope | **Per app instance** — each replica has its own pool, blind to the others | **Global** — one queue in front of the database, sees all demand |
+| Databases | Any JDBC database | PostgreSQL only |
+| Granularity | A borrowed conn is fully yours until `close()` (session-like) | session / **transaction** / statement modes |
+| Borrow cost | Nanoseconds (in-process, lock-free) | A network round-trip |
+| Solves | Per-request connection setup latency; framework integration; per-instance cap | **Total** connection count across all apps; protects `max_connections`; zero-downtime `PAUSE`/`RESUME` |
+| Can't do | See or limit *global* demand across replicas | Make `getConnection()` in-process-fast; pool for non-Postgres DBs |
+
+The mental model: **HikariCP answers "how does *my instance* get a connection quickly and safely?" PgBouncer answers "how do *all instances together* avoid drowning Postgres?"**
+
+## When to Use Which (and When Both)
+
+- **One app, a handful of instances** — HikariCP alone. 3 instances × 10 conns = 30 backends; Postgres doesn't need protection from that. Adding PgBouncer here is an extra hop and an extra thing to operate for no benefit.
+- **Many instances / microservices on one database** — both. 30 services × 3 replicas × 10 conns = 900 wanted connections; Postgres wants ~50. PgBouncer (transaction mode) is the only place that global math can be enforced.
+- **Serverless / very elastic workloads** — PgBouncer (or RDS Proxy) is essential: lambdas can't meaningfully hold an in-process pool across invocations.
+- **Non-Postgres databases** — HikariCP only; PgBouncer doesn't apply (MySQL world has ProxySQL for the same role).
+- **Zero-downtime failovers / maintenance** — PgBouncer's `PAUSE`/`RESUME` is the tool; no app-side pool can do this.
+- **Never PgBouncer *instead of* HikariCP in a Spring app** — Spring/JPA expect a pooled `DataSource`, and even though PgBouncer accepts connections cheaply, each new client conn still costs a TCP+auth round-trip per borrow. Keep Hikari; point it at PgBouncer.
+
+<Callout type="tip" title="Rule of thumb">
+  HikariCP is non-negotiable in a Java service — the question is only its size. PgBouncer becomes necessary the moment <strong>sum(all Hikari pools) ≫ what Postgres can actively execute</strong>. Until then it's optional; after that it's the only correct fix.
+</Callout>
+
+## Running HikariCP Behind PgBouncer
+
+The layered setup — app threads → Hikari (JDBC pool) → PgBouncer :6432 (transaction mode) → Postgres:
+
+```properties title="application.properties (Hikari → PgBouncer)"
+# point at pgbouncer, not postgres
+spring.datasource.url=jdbc:postgresql://pgbouncer-host:6432/appdb?prepareThreshold=0
+
+# modest per-instance pool; pgbouncer owns the global math
+spring.datasource.hikari.maximum-pool-size=10
+# recycle client conns faster than pgbouncer's client timeouts
+spring.datasource.hikari.max-lifetime=900000
+# isValid() ping travels through pgbouncer — keep it enabled (default)
+```
+
+- **Prepared statements** — the Postgres JDBC driver uses server-side prepared statements after 5 executions; under transaction pooling use PgBouncer ≥ 1.21 with `max_prepared_statements`, or `prepareThreshold=0` in the URL (details on the PgBouncer page).
+- **Sizing the stack** — sum of Hikari `maximumPoolSize` across instances ≤ PgBouncer `max_client_conn`; PgBouncer `default_pool_size` sized from Postgres capacity. Three numbers, one budget.
+- **Timeout ordering** — Hikari `maxLifetime` &lt; PgBouncer client-side timeouts; PgBouncer `server_lifetime` &lt; any Postgres/network kill timer. Each layer recycles before the layer below pulls the rug.
+- **Session state still forbidden** — Hikari's `close()` returns the conn to *Hikari*, but between transactions PgBouncer may hand your next transaction a different *server* conn: no session `SET`, no session advisory locks (see the transaction-mode gotchas on the PgBouncer page).
+
+## Common Pitfalls
+
+<ul class="plain">
+  <li><strong>Oversizing the pool</strong> — 100 connections "for safety" makes everything slower and hides the real problem (slow queries, long transactions).</li>
+  <li><strong><code>maxLifetime</code> longer than infra timeouts</strong> — random broken-pipe errors under low traffic; the #1 Hikari misconfiguration.</li>
+  <li><strong>Holding a connection across external calls</strong> — an <code>@Transactional</code> method that calls a slow HTTP API holds a pooled conn hostage the whole time; pool math collapses.</li>
+  <li><strong>Setting <code>connectionTestQuery</code> on modern drivers</strong> — slower than <code>isValid()</code> and unnecessary; a cargo-cult leftover from C3P0 days.</li>
+  <li><strong>Leaks from manual JDBC</strong> — every non-try-with-resources <code>getConnection()</code> is a future 3 AM incident.</li>
+  <li><strong>Ignoring <code>pending</code>/<code>timeout</code> metrics</strong> — pool exhaustion looks like "the database is slow" until you look at <code>hikaricp.connections.pending</code>.</li>
+  <li><strong>One giant shared pool for mixed workloads</strong> — slow reporting queries starve fast OLTP borrows; split pools per workload (same bulkhead logic as thread pools).</li>
+</ul>
+
+## Best Practices
+
+<ul class="checks">
+  <li>Keep the fixed-size default (<code>minimumIdle</code> = <code>maximumPoolSize</code>) and start with ~10 per instance.</li>
+  <li>Size from database cores (<code>cores × 2</code> total across all clients), then tune with metrics — never from thread count.</li>
+  <li>Set <code>maxLifetime</code> below every idle-kill timer between app and DB; enable <code>keepaliveTime</code> behind aggressive firewalls.</li>
+  <li>Turn on <code>leakDetectionThreshold</code> (~60 s) outside prod hot paths.</li>
+  <li>Name every pool; export Micrometer metrics; alert on <code>pending</code> and <code>timeout</code>.</li>
+  <li>Keep transactions short — the conn is only reusable after commit (and behind PgBouncer this rule counts double).</li>
+  <li>Add PgBouncer when global demand outgrows Postgres — don't grow Hikari pools past what the DB can execute.</li>
+</ul>
+
+## Interview Questions
+
+1. Why does an application need a connection pool when the database can accept connections directly?
+2. What makes HikariCP faster than older pools like C3P0 or DBCP?
+3. Walk through `getConnection()` — what happens when the pool is exhausted?
+4. `maximumPoolSize` vs `minimumIdle` — why is a fixed-size pool recommended?
+5. Why must `maxLifetime` be shorter than infrastructure idle timeouts? What breaks otherwise?
+6. How do you detect and fix a connection leak in production?
+7. Why do small pools often outperform large ones? Derive a starting pool size for an 8-core DB server.
+8. HikariCP vs PgBouncer — what does each pool, at what layer, and what problem does each solve?
+9. When would you run both together? How do you size the combined stack?
+10. What breaks when HikariCP talks to PgBouncer in transaction mode, and how do you fix prepared statements?
+11. Which Hikari metrics would you alert on, and what does sustained `pending` &gt; 0 mean?
+12. Why should you not hold a transaction open while calling an external service?
