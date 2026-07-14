@@ -2,7 +2,12 @@
   "permissions": {
     "allow": [
       "Bash(git add *)",
-      "Bash(git -c commit.gpgsign=false commit -q -m 'Redesign: modern dark theme \\(indigo accent, Inter + JetBrains Mono\\) *)"
+      "Bash(git -c commit.gpgsign=false commit -q -m 'Redesign: modern dark theme \\(indigo accent, Inter + JetBrains Mono\\) *)",
+      "Bash(git checkout *)",
+      "Bash(git merge *)",
+      "Bash(git commit -m 'Add Java ExecutorService deep-dive concept with thread pool simulator *)",
+      "Bash(xargs kill)",
+      "Bash(git commit -m 'Add paper light theme as default with dark-mode toggle *)"
     ]
   }
 }

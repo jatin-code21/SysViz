@@ -58,8 +58,8 @@ export default function ConceptExplorer({ concepts, base }: Props) {
   const chip = (active: boolean) =>
     `text-sm rounded-full px-3.5 py-1.5 border transition-colors cursor-pointer ${
       active
-        ? 'bg-accent-soft border-accent-line text-accent-ink shadow-[0_0_14px_rgba(124,108,255,.2)]'
-        : 'border-line text-nav-ink hover:border-nav-muted'
+        ? 'bg-accent-soft border-accent-line text-accent-ink shadow-[0_0_14px_var(--color-num-glow)]'
+        : 'border-line text-sub hover:border-accent-line hover:text-ink'
     }`;
 
   return (
@@ -70,7 +70,7 @@ export default function ConceptExplorer({ concepts, base }: Props) {
         onChange={(e) => setQuery(e.target.value)}
         placeholder="Search concepts, tags, sections…  (e.g. “consumer group”, “singleton”)"
         autoComplete="off"
-        className="w-full bg-panel border border-line text-white placeholder-nav-muted rounded-xl px-5 py-3.5 text-[.95rem] outline-none focus:border-accent-line focus:shadow-[0_0_20px_rgba(124,108,255,.15)] transition-shadow mb-4"
+        className="w-full bg-panel border border-line text-ink placeholder-sub rounded-xl px-5 py-3.5 text-[.95rem] outline-none focus:border-accent-line focus:shadow-[0_0_20px_var(--color-num-glow)] transition-shadow mb-4"
       />
 
       <div className="flex flex-wrap gap-2 mb-8">
@@ -90,14 +90,14 @@ export default function ConceptExplorer({ concepts, base }: Props) {
       </div>
 
       {visible.length === 0 && (
-        <p className="text-nav-muted text-center py-16">
+        <p className="text-sub text-center py-16">
           Nothing found — that concept hasn’t been added yet.
         </p>
       )}
 
       {grouped.map(([groupName, items]) => (
         <div key={groupName} className="mb-8">
-          <h2 className="text-nav-muted text-xs font-bold uppercase tracking-[1.5px] mb-3">
+          <h2 className="text-sub text-xs font-bold uppercase tracking-[1.5px] mb-3">
             {groupName}
           </h2>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -105,9 +105,9 @@ export default function ConceptExplorer({ concepts, base }: Props) {
               <a
                 key={c.slug}
                 href={`${base}concepts/${c.slug}/`}
-                className="group block bg-panel border border-line rounded-xl p-5 transition-all hover:-translate-y-0.5 hover:border-accent-line hover:shadow-[0_0_24px_rgba(124,108,255,.12)]"
+                className="group block bg-panel border border-line rounded-xl p-5 transition-all hover:-translate-y-0.5 hover:border-accent-line hover:shadow-[0_0_24px_var(--color-num-glow)]"
               >
-                <div className="font-semibold text-white text-[1.02rem] mb-1 group-hover:text-accent-ink">
+                <div className="font-semibold text-heading text-[1.02rem] mb-1 group-hover:text-accent-ink">
                   {c.title}
                 </div>
                 <p className="text-sub text-[.85rem] leading-snug mb-3">{c.description}</p>

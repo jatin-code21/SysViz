@@ -17,8 +17,20 @@ const { title, description = 'SysViz — personal interactive cheatsheets for ba
     <meta name="description" content={description} />
     <link rel="icon" href={`${import.meta.env.BASE_URL}favicon.svg`} type="image/svg+xml" />
     <title>{title}</title>
+    <script is:inline>
+      // Runs before paint so the saved theme never flashes. Default: paper (light).
+      document.documentElement.dataset.theme = localStorage.getItem('sysviz-theme') || 'light';
+    </script>
   </head>
   <body class="bg-bg text-ink font-sans min-h-screen">
     <slot />
+    <script>
+      document.addEventListener('click', (e) => {
+        if (!(e.target instanceof Element) || !e.target.closest('[data-theme-toggle]')) return;
+        const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+        document.documentElement.dataset.theme = next;
+        localStorage.setItem('sysviz-theme', next);
+      });
+    </script>
   </body>
 </html>

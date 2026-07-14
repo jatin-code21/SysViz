@@ -20,7 +20,7 @@ card, TOC, and search all derive from it. Frontmatter contract (schema in
 `src/content.config.ts`):
 
 ```yaml
-title: Apache Kafka          # last word gets the orange accent in the hero
+title: Apache Kafka          # last word gets the accent color in the hero
 description: one-liner shown in hero + home card
 category: Messaging          # groups cards on home (reuse existing categories when sensible)
 tags: [streaming, spring-boot]
@@ -31,7 +31,7 @@ links: [{ label: Kafka Docs, href: https://... }]   # optional footer links
 Body conventions (see `src/content/concepts/kafka.mdx` as the reference):
 
 - Content before the first `##` renders as the intro box.
-- Every `##` heading becomes a numbered white panel (via `plugins/rehype-sections.mjs`)
+- Every `##` heading becomes a numbered panel (via `plugins/rehype-sections.mjs`)
   and a sidebar TOC entry. `###` for sub-steps inside a section.
 - Plain markdown lists render as definition-style rows (bold term — description).
   Opt-in variants: `<ul class="plain">` (bullets), `<ul class="checks">` (green ✓).
@@ -43,11 +43,15 @@ Body conventions (see `src/content/concepts/kafka.mdx` as the reference):
   `#0f0f14` container with `#26262e` border, status line explaining each action,
   small controls).
 
-Theme: modern dark ("Linear/Vercel docs" direction, user-chosen) — tokens in `@theme`
-in `src/styles/global.css`: bg `#0a0a0c`, cards `#131318` with `#26262e` borders,
-indigo accent `#7c6cff`, Inter + JetBrains Mono (self-hosted via @fontsource-variable).
-No white/light surfaces; new components should use the existing token classes
-(`bg-panel`, `border-line`, `text-accent-ink`, …) rather than hardcoded colors.
+Theme: dual, user-chosen. Default is "paper" (warm cream reading surface, indigo
+accent); a ☾/☀ toggle (persisted in localStorage, wired in `BaseLayout.astro`)
+switches to the dark theme via `html[data-theme="dark"]` token overrides. All tokens
+live in `@theme` in `src/styles/global.css`. The sidebar, code blocks, and viz
+islands stay dark in BOTH themes (terminal-on-paper look), so simulators may keep
+hardcoded dark hex values — but everything else MUST use token classes (`bg-panel`,
+`border-line`, `text-heading`, `text-accent-ink`, `bg-info-bg`, …) so it adapts to
+both themes. Never hardcode `text-white`/`bg-white` in page content. Fonts: Inter +
+JetBrains Mono (self-hosted via @fontsource-variable).
 
 ## Verify
 
