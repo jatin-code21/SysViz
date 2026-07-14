@@ -1,0 +1,293 @@
+---
+title: PgBouncer
+description: Deep dive — why Postgres needs connection pooling, pooling modes, transaction-mode gotchas, sizing, and running it with Spring Boot
+category: Databases
+tags: [postgresql, connection-pooling, performance, spring-boot]
+updated: 2026-07-14
+links:
+  - label: PgBouncer Docs
+    href: https://www.pgbouncer.org/config.html
+  - label: PgBouncer FAQ
+    href: https://www.pgbouncer.org/faq.html
+---
+
+import Callout from '../../components/ui/Callout.astro';
+import PoolModeSimulator from '../../components/viz/pgbouncer/PoolModeSimulator.tsx';
+
+**What is PgBouncer?** A lightweight **connection pooler for PostgreSQL** that sits between your applications and the database. Apps open cheap connections to PgBouncer; PgBouncer multiplexes them onto a small, controlled set of real Postgres connections. One tiny single-process daemon routinely lets thousands of client connections share a few dozen server connections.
+
+## Why Postgres Needs a Pooler
+
+The root cause is Postgres's architecture: **every connection is a forked OS process** (not a thread).
+
+- **Connections are heavy** — each backend process costs roughly 5–10 MB of RAM plus kernel resources. 500 connections ≈ several GB gone before running a single query.
+- **Connection setup is slow** — fork + TLS handshake + authentication + backend initialization on every connect. Doing this per request murders latency.
+- **Too many backends degrade everyone** — the OS scheduler and Postgres internals (lock manager, snapshot computation) get slower as backend count grows. Past a few hundred *active* backends, total throughput usually goes **down**.
+- **`max_connections` is a hard wall** — default 100. When it's hit, new connections are refused with `FATAL: sorry, too many clients already`.
+- **Microservices multiply the problem** — 20 service instances × 20-connection app pools = 400 Postgres connections, mostly sitting idle. Serverless/lambdas are even worse: every cold start wants a fresh connection.
+
+The fix is the same idea as a thread pool: keep a small set of expensive resources busy, and let many cheap clients share them.
+
+<Callout type="info" title="Rule of thumb">
+  A Postgres server rarely benefits from more active connections than <strong>a small multiple of its CPU cores</strong> (a common starting point: cores × 2–4 for mixed workloads). Everything above that should be waiting in a pooler's queue — not occupying a backend process.
+</Callout>
+
+## What PgBouncer Actually Is
+
+- **A proxy, not a database** — it speaks the Postgres wire protocol on both sides. Apps connect to it exactly as if it were Postgres (usually port `6432`).
+- **Extremely light** — a single process with an event loop; each *client* connection costs ~2 kB of memory (vs megabytes for a real backend). Tens of thousands of client connections are fine.
+- **Single-threaded** — one PgBouncer process uses one CPU core. That's rarely the bottleneck (it only shuffles bytes), and you can run multiple processes with `so_reuseport = 1` if it becomes one.
+- **Pools are per `(database, user)` pair** — each distinct database+user combination gets its own pool of `pool_size` server connections. Ten users × `default_pool_size = 20` can mean 200 server connections; plan for it.
+- **Not a load balancer** — it doesn't split reads/writes or route between replicas (that's pgpool-II / app-level territory). One PgBouncer fronts one logical destination per configured database entry.
+
+## Where It Sits — Architecture
+
+<div class="flex items-center justify-between gap-3.5 flex-wrap mb-3.5">
+  <div class="bg-panel-soft border border-line rounded-[10px] px-4.5 py-3.5 text-center text-[.85rem] min-w-[130px]">
+    App instances
+    <div class="text-sub text-[.75rem] mt-1">1000s of cheap<br/>client conns</div>
+  </div>
+  <div class="text-[.78rem] text-sub text-center">→ :6432 →</div>
+  <div class="bg-accent-soft border border-accent-line rounded-[10px] px-4.5 py-3.5 text-center text-[.85rem] min-w-[130px]">
+    <strong>PgBouncer</strong>
+    <div class="text-sub text-[.75rem] mt-1">multiplexes onto<br/>small server pool</div>
+  </div>
+  <div class="text-[.78rem] text-sub text-center">→ :5432 →</div>
+  <div class="bg-panel-soft border border-line rounded-[10px] px-4.5 py-3.5 text-center text-[.85rem] min-w-[130px]">
+    PostgreSQL
+    <div class="text-sub text-[.75rem] mt-1">few dozen real<br/>backend processes</div>
+  </div>
+</div>
+
+The asymmetry is the whole point: **client side is cheap and elastic, server side is scarce and protected.** How aggressively PgBouncer reuses the server side is decided by the pooling mode.
+
+## The Three Pooling Modes
+
+`pool_mode` is the single most important setting — it defines *when* a server connection is given back to the pool:
+
+| Mode | Server conn is held… | Reuse | Compatibility |
+| --- | --- | --- | --- |
+| `session` (default) | From client connect until client disconnect | Lowest — 1 client = 1 server conn | Everything works |
+| `transaction` | Only while a transaction is running | High — the sweet spot for most apps | Session state breaks (next sections) |
+| `statement` | Only for a single statement | Highest | Multi-statement transactions are **forbidden**; niche (autocommit-only workloads) |
+
+- **Session mode** is barely pooling at all — it mainly saves connection *setup* cost (great in front of serverless, where connections churn). An idle client still hogs a server connection.
+- **Transaction mode** is where the magic multiplexing happens: between your transactions, the server connection serves *someone else*. This is what people mean when they say "run PgBouncer in front of it."
+- **Statement mode** breaks `BEGIN … COMMIT` entirely; you'll almost never use it.
+
+## Pooling Modes — Interactive
+
+`pool_size` below is 2. Add ~6 clients in **session** mode and watch most of them starve — each connected client permanently owns a server connection, even while idle. Then switch to **transaction** mode: the same 2 server connections happily serve all 6 clients, because they're only borrowed for the duration of each transaction. The footer shows real `SHOW POOLS` counters.
+
+<PoolModeSimulator client:visible />
+
+<ul class="checks">
+  <li>Session mode: a client binds a server conn for its whole lifetime — idle time is wasted capacity.</li>
+  <li>Transaction mode: conns are borrowed at <code>BEGIN</code> and returned at <code>COMMIT</code> — idle clients cost nothing.</li>
+  <li><code>cl_waiting</code> &gt; 0 sustained means the pool is too small — or clients hold transactions too long.</li>
+  <li>Server connections are opened lazily, only when first needed.</li>
+  <li>Consecutive transactions from one client may run on <em>different</em> server conns — that's why session state breaks.</li>
+</ul>
+
+## Core Configuration (pgbouncer.ini)
+
+```ini title="/etc/pgbouncer/pgbouncer.ini"
+[databases]
+; clients connect to "appdb" on pgbouncer; it forwards to the real server
+appdb = host=127.0.0.1 port=5432 dbname=appdb
+; a database entry can also pin a pool size or user:
+; reports = host=10.0.0.7 dbname=warehouse pool_size=5
+
+[pgbouncer]
+listen_addr = 0.0.0.0
+listen_port = 6432
+
+auth_type = scram-sha-256
+auth_file = /etc/pgbouncer/userlist.txt
+
+pool_mode = transaction
+
+; server side (scarce)
+default_pool_size = 20        ; per (database, user) pair!
+min_pool_size = 5             ; keep warm connections ready
+reserve_pool_size = 3         ; emergency extra conns…
+reserve_pool_timeout = 3      ; …granted after a client waits this many seconds
+max_db_connections = 60       ; hard cap per database, across all users
+
+; client side (cheap)
+max_client_conn = 2000
+
+; hygiene
+server_lifetime = 3600        ; recycle server conns hourly
+server_idle_timeout = 600     ; close idle server conns
+admin_users = pgbouncer_admin
+```
+
+Reload without dropping connections: `psql -p 6432 -U pgbouncer_admin pgbouncer -c "RELOAD"` (or `SIGHUP`).
+
+## Authentication
+
+PgBouncer authenticates the *client* itself, then logs into Postgres on the client's behalf — so it needs credentials:
+
+- **`auth_file` (userlist.txt)** — static file of users and password hashes:
+
+```text title="/etc/pgbouncer/userlist.txt"
+"app_user" "SCRAM-SHA-256$4096:salt$storedkey:serverkey"
+```
+
+  Get the hash straight from Postgres: `SELECT usename, passwd FROM pg_shadow WHERE usename = 'app_user';`
+
+- **`auth_query`** — skip the static file; let PgBouncer look passwords up in the database via one designated `auth_user`:
+
+```ini title="pgbouncer.ini (auth_query variant)"
+auth_user = pgbouncer_lookup
+auth_query = SELECT usename, passwd FROM pg_shadow WHERE usename = $1
+```
+
+  (In practice you wrap this in a `SECURITY DEFINER` function so `pgbouncer_lookup` can't read `pg_shadow` wholesale.)
+
+- **`auth_type`** — use `scram-sha-256` (matches modern Postgres defaults). `trust` is for local dev only.
+
+<Callout type="warn" title="TLS terminates twice">
+  PgBouncer is a man-in-the-middle by design: configure `client_tls_*` (app → PgBouncer) and `server_tls_*` (PgBouncer → Postgres) separately. Forgetting the second leg silently sends database traffic unencrypted.
+</Callout>
+
+## Sizing: The Parameters That Matter
+
+- **`default_pool_size`** — server conns per `(database, user)` pair. Start near `cores × 2–4` on the Postgres box divided across your pools, then tune with `SHOW POOLS`.
+- **`min_pool_size`** — pre-warmed connections so a traffic spike doesn't pay connection-setup latency.
+- **`reserve_pool_size` + `reserve_pool_timeout`** — burst headroom: extra conns unlocked only when clients have already waited. A pressure-relief valve, not free capacity.
+- **`max_db_connections`** — cap per database across all users; your real protection when many users share one database.
+- **`max_client_conn`** — total client connections PgBouncer will accept (cheap; set generously, e.g. 2000+).
+- **`server_lifetime` / `server_idle_timeout`** — recycle server conns to avoid memory bloat in long-lived backends and to pick up config/DNS changes.
+- **`query_wait_timeout`** — how long a client may sit in `cl_waiting` before PgBouncer gives up and errors; your back-pressure signal.
+
+<Callout type="tip" title="The sizing mindset">
+  Total real connections ≈ <code>pools × pool_size + reserve</code>. Keep that number close to what Postgres can <em>actively execute</em> (cores × small factor). Waiting briefly in PgBouncer's queue is normal and healthy — hundreds of half-idle Postgres backends are not. This is the same "small pool + queue" logic as a bounded thread pool.
+</Callout>
+
+## Transaction Mode Breaks Session State
+
+In transaction mode, consecutive transactions from one client can land on **different server connections** — so anything stored *in the server session* silently disappears or, worse, leaks to another client:
+
+- **`SET` / session GUCs** — `SET statement_timeout = ...` applies to whichever backend you happened to get (use `SET LOCAL` inside the transaction instead).
+- **Prepared statements** — `PREPARE`/protocol-level statements live per backend. Historic dealbreaker for JDBC; since **PgBouncer 1.21**, `max_prepared_statements = 100` makes protocol-level prepared statements work by re-preparing them per server conn.
+- **Advisory locks** — session-level `pg_advisory_lock()` is bound to a backend; use transaction-level `pg_advisory_xact_lock()` instead.
+- **`LISTEN` / `NOTIFY`** — LISTEN registers on a backend you won't keep. Needs a dedicated direct connection (bypass PgBouncer or use a session-mode pool for it).
+- **Temp tables & cursors `WITH HOLD`** — live in the session; gone (or someone else's) on the next transaction.
+- **`server_reset_query`** — defaults to `DISCARD ALL`, and in transaction mode it is **not run between clients** by default (`server_reset_query_always = 0`) because well-behaved apps shouldn't leave session state behind.
+
+<Callout type="warn" title="The classic symptom">
+  "Works locally, breaks behind PgBouncer" — random <code>prepared statement "S_1" does not exist</code> errors, or a <code>SET</code> that seems to randomly apply. That's session state meeting transaction pooling. Fix the app pattern (or pin that workload to a session-mode pool), don't fight the pooler.
+</Callout>
+
+## The Admin Console
+
+PgBouncer exposes a fake database named `pgbouncer` for operations:
+
+```bash
+psql -h 127.0.0.1 -p 6432 -U pgbouncer_admin pgbouncer
+
+SHOW POOLS;      -- cl_active, cl_waiting, sv_active, sv_idle per pool
+SHOW STATS;      -- total_xact_count, total_query_time, avg latencies
+SHOW CLIENTS;    -- every client conn and what it's doing
+SHOW SERVERS;    -- every server conn
+SHOW CONFIG;     -- live settings
+
+RELOAD;                  -- re-read pgbouncer.ini, no downtime
+PAUSE appdb;             -- let txns finish, hold new work (zero-downtime failover!)
+RESUME appdb;
+KILL appdb;              -- drop everything for that db
+```
+
+`PAUSE` + repoint `[databases]` host + `RELOAD` + `RESUME` is the classic **zero-downtime database switchover** dance — clients just see a brief pause, not errors.
+
+## Spring Boot & JDBC Integration
+
+Keep HikariCP — it manages *client* connections (to PgBouncer), which are cheap; PgBouncer manages the scarce server side. The two layers solve different problems:
+
+```properties title="application.properties"
+# point at pgbouncer, not postgres
+spring.datasource.url=jdbc:postgresql://pgbouncer-host:6432/appdb
+spring.datasource.username=app_user
+spring.datasource.password=${DB_PASSWORD}
+
+# modest app-side pool; pgbouncer does the heavy multiplexing
+spring.datasource.hikari.maximum-pool-size=10
+# stay below pgbouncer's server_lifetime / idle timeouts
+spring.datasource.hikari.max-lifetime=1800000
+```
+
+JDBC specifics that bite in **transaction mode**:
+
+- **Server-side prepared statements** — the Postgres JDBC driver switches to named prepared statements after 5 executions (`prepareThreshold`). Either run PgBouncer ≥ 1.21 with `max_prepared_statements = 100`, or disable them: `jdbc:postgresql://...?prepareThreshold=0`.
+- **Don't `SET` session state from the app** — Hikari's `connectionInitSql` runs per *client* conn, not per server conn; it won't do what you think behind transaction pooling.
+- **`@Transactional` maps perfectly** — each Spring transaction = one PgBouncer lease, returned at commit. Long transactions (or "open session in view" holding transactions across HTTP calls) hold server conns hostage — keep transactions short.
+- **LISTEN/NOTIFY consumers** (e.g. pg notification listeners) need a direct Postgres connection, not a pooled one.
+
+## PgBouncer vs the Alternatives
+
+| Tool | What it is | Choose it when |
+| --- | --- | --- |
+| **PgBouncer** | Minimal single-purpose pooler | Default choice — you want pooling, nothing else |
+| **pgpool-II** | Pooler + load balancing + replication routing | You need read/write splitting across replicas (heavier, more complex) |
+| **Odyssey** | Multithreaded pooler (Yandex) | PgBouncer's single core is genuinely saturated |
+| **PgCat** | Modern Rust pooler — sharding, LB, multithreaded | You want load balancing + pooling in one, newer stack |
+| **RDS Proxy / Cloud SQL managed poolers** | Managed cloud equivalents | You're on managed cloud DBs and want zero ops |
+| **HikariCP alone** | App-side pool only | Single app instance or few services — no shared bottleneck yet |
+
+App-side pools stop being enough exactly when **many app instances** each bring their own pool — nobody sees global demand. A central pooler restores one queue in front of the scarce resource.
+
+## Deployment Patterns
+
+- **Central pooler pair** — PgBouncer on/next to the DB host (or an LB'd pair for HA). One global view of demand; the usual starting point.
+- **Sidecar per app node** — PgBouncer on every app host: no extra hop, but pools fragment again (each sidecar has its own). Often combined with a central layer.
+- **Scaling out** — multiple PgBouncer processes with `so_reuseport = 1` share one port across CPU cores; DNS/LB across hosts for HA (PgBouncer holds no state worth failing over).
+- **Kubernetes** — either a sidecar container or a Deployment + Service in front of the DB; managed operators (CloudNativePG, Crunchy) ship PgBouncer integration.
+
+## Monitoring
+
+- **`SHOW POOLS` → `cl_waiting`** — the number one signal. Sustained waiting = pool too small or transactions too long.
+- **`SHOW STATS` → `avg_wait_time`** — microseconds clients spend queued; your latency tax.
+- **`sv_idle` high all day** — pool oversized; you're holding Postgres backends for nothing.
+- **`maxwait` in `SHOW POOLS`** — how long the oldest waiting client has waited; pairs with `query_wait_timeout`.
+- **Exporters** — `pgbouncer_exporter` (Prometheus) scrapes the admin console; alert on `cl_waiting` and connection errors.
+- Cross-check Postgres side: `select count(*) from pg_stat_activity` should now be small and boring — that's the whole point.
+
+## Common Pitfalls
+
+<ul class="plain">
+  <li><strong>Transaction mode + session features</strong> — prepared statements, SET, advisory locks, LISTEN/NOTIFY, temp tables (see the gotchas section). The #1 source of "PgBouncer broke my app".</li>
+  <li><strong>Forgetting pools are per (db, user)</strong> — 5 users × default_pool_size 20 = 100 server conns, not 20. Cap with <code>max_db_connections</code>.</li>
+  <li><strong>Long transactions in transaction mode</strong> — a transaction held open across an HTTP call to another service hogs a server conn exactly like session mode; pooling gains evaporate.</li>
+  <li><strong>App pool bigger than PgBouncer pool</strong> — 50 Hikari conns fighting over 20 server conns just moves queueing around; keep layers coherent.</li>
+  <li><strong>userlist.txt drift</strong> — password rotated in Postgres but not in the auth file → auth failures only via PgBouncer. Prefer <code>auth_query</code>.</li>
+  <li><strong>No TLS on the server leg</strong> — client-side TLS configured, server side forgotten.</li>
+  <li><strong>Treating <code>cl_waiting</code> as an error</strong> — brief waits are the design working; only sustained waiting is a capacity problem.</li>
+</ul>
+
+## Best Practices
+
+<ul class="checks">
+  <li>Use <code>pool_mode = transaction</code> for stateless app traffic; a separate session-mode pool (or direct connection) for LISTEN/NOTIFY and migration tools.</li>
+  <li>Size the server side from Postgres capacity (cores × 2–4), not from client demand.</li>
+  <li>Set <code>max_db_connections</code> as the global safety net.</li>
+  <li>Keep transactions short — the pooler can only reclaim conns at COMMIT.</li>
+  <li>On JDBC: PgBouncer ≥ 1.21 + <code>max_prepared_statements</code>, or <code>prepareThreshold=0</code>.</li>
+  <li>Monitor <code>cl_waiting</code>, <code>avg_wait_time</code>, <code>maxwait</code>; alert on sustained growth.</li>
+  <li>Use <code>PAUSE</code>/<code>RESUME</code> for zero-downtime maintenance and failovers.</li>
+  <li>Recycle server conns (<code>server_lifetime</code>) to keep backend memory in check.</li>
+</ul>
+
+## Interview Questions
+
+1. Why are PostgreSQL connections expensive, and how does that differ from e.g. MySQL's thread-per-connection model?
+2. What problem does PgBouncer solve that an application-side pool (HikariCP) cannot?
+3. Explain session vs transaction vs statement pooling modes and their trade-offs.
+4. Why do prepared statements break under transaction pooling, and what are the fixes?
+5. Pools are per (database, user) — why does that matter for sizing?
+6. What do `cl_active`, `cl_waiting`, `sv_active`, `sv_idle` tell you? Which one do you alert on?
+7. How would you perform a zero-downtime database failover using PgBouncer?
+8. Where would you deploy PgBouncer in a Kubernetes microservices setup — sidecar or central — and why?
+9. How do `reserve_pool_size` and `query_wait_timeout` interact under a traffic burst?
+10. When would you pick pgpool-II or PgCat over PgBouncer?
