@@ -3,30 +3,87 @@
 @import "@fontsource-variable/jetbrains-mono";
 
 @theme {
-  /* Modern dark theme: near-black bg, elevated bordered cards, indigo accent */
+  /* Default theme: "paper" — warm cream reading surface, soft contrast,
+   * deep indigo accent. Sidebar, code blocks and viz islands stay dark in
+   * both themes (terminal-on-paper look). Dark theme overrides below. */
+  --color-bg: #f4f1ea;
+  --color-panel: #fbfaf6;
+  --color-panel-soft: #f0ece2;
+  --color-ink: #3d3a31;
+  --color-heading: #23201a;
+  --color-sub: #797365;
+  --color-accent: #5b4bd8;
+  --color-accent-ink: #5443c9;
+  --color-accent-soft: rgba(91, 75, 216, 0.08);
+  --color-accent-line: rgba(91, 75, 216, 0.3);
+  --color-line: #e4ded1;
+  --color-hero-ink: #6b665c;
+  --color-ok: #15803d;
+  --color-num-glow: rgba(91, 75, 216, 0.12);
+  --color-code-bg: rgba(62, 50, 20, 0.055);
+
+  /* Sidebar stays dark in both themes */
+  --color-nav: #14131a;
+  --color-nav-hover: #211f2b;
+  --color-nav-ink: #b9b9c3;
+  --color-nav-muted: #75717e;
+  --color-nav-line: #26262e;
+  --color-nav-accent: #8f82ff;
+
+  /* Callout variants */
+  --color-info-bg: rgba(2, 132, 199, 0.06);
+  --color-info-line: rgba(2, 132, 199, 0.3);
+  --color-info-ink: #0369a1;
+  --color-tip-bg: rgba(5, 150, 105, 0.07);
+  --color-tip-line: rgba(5, 150, 105, 0.3);
+  --color-tip-ink: #047857;
+  --color-warn-bg: rgba(217, 119, 6, 0.07);
+  --color-warn-line: rgba(217, 119, 6, 0.35);
+  --color-warn-ink: #b45309;
+
+  --font-sans: "Inter Variable", "Segoe UI", ui-sans-serif, system-ui, Arial, sans-serif;
+  --font-mono: "JetBrains Mono Variable", "Fira Code", ui-monospace, SFMono-Regular, monospace;
+}
+
+/* Dark theme: the original near-black / indigo look, via the ☾ toggle */
+html[data-theme="dark"] {
   --color-bg: #0a0a0c;
   --color-panel: #131318;
   --color-panel-soft: #1a1a21;
   --color-ink: #e6e6eb;
+  --color-heading: #ffffff;
   --color-sub: #8b8b96;
   --color-accent: #7c6cff;
   --color-accent-ink: #a89dff;
   --color-accent-soft: rgba(124, 108, 255, 0.12);
   --color-accent-line: rgba(124, 108, 255, 0.35);
   --color-line: #26262e;
-  --color-nav: #0c0c0f;
-  --color-nav-hover: #1c1c23;
-  --color-nav-ink: #b9b9c3;
-  --color-nav-muted: #6f6f7a;
   --color-hero-ink: #a3a3ad;
   --color-ok: #34d399;
+  --color-num-glow: rgba(124, 108, 255, 0.25);
+  --color-code-bg: rgba(255, 255, 255, 0.06);
 
-  --font-sans: "Inter Variable", "Segoe UI", ui-sans-serif, system-ui, Arial, sans-serif;
-  --font-mono: "JetBrains Mono Variable", "Fira Code", ui-monospace, SFMono-Regular, monospace;
+  --color-info-bg: rgba(56, 189, 248, 0.08);
+  --color-info-line: rgba(56, 189, 248, 0.3);
+  --color-info-ink: #7dd3fc;
+  --color-tip-bg: rgba(52, 211, 153, 0.08);
+  --color-tip-line: rgba(52, 211, 153, 0.3);
+  --color-tip-ink: #6ee7b7;
+  --color-warn-bg: rgba(251, 191, 36, 0.08);
+  --color-warn-line: rgba(251, 191, 36, 0.3);
+  --color-warn-ink: #fcd34d;
 }
 
 html {
   scroll-behavior: smooth;
+}
+
+/* Theme toggle: any element with data-theme-toggle gets the right icon */
+[data-theme-toggle]::before {
+  content: "☾";
+}
+html[data-theme="dark"] [data-theme-toggle]::before {
+  content: "☀";
 }
 
 /* ---------------------------------------------------------------------------
@@ -71,7 +128,7 @@ html {
   font-weight: 650;
   letter-spacing: -0.01em;
   margin: 0 0 16px;
-  color: #fff;
+  color: var(--color-heading);
   border-bottom: 1px solid var(--color-line);
   padding-bottom: 12px;
   scroll-margin-top: 20px;
@@ -81,7 +138,7 @@ html {
   background: var(--color-accent-soft);
   color: var(--color-accent-ink);
   border: 1px solid var(--color-accent-line);
-  box-shadow: 0 0 14px rgba(124, 108, 255, 0.25);
+  box-shadow: 0 0 14px var(--color-num-glow);
   font-size: 0.8rem;
   width: 26px;
   height: 26px;
@@ -107,7 +164,7 @@ html {
 }
 
 .concept-section strong {
-  color: #fff;
+  color: var(--color-heading);
 }
 
 .concept-section a {
@@ -193,7 +250,7 @@ html {
 }
 
 .concept-section :not(pre) > code {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--color-code-bg);
   border: 1px solid var(--color-line);
   padding: 2px 6px;
   border-radius: 5px;

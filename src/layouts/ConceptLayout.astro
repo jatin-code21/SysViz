@@ -28,10 +28,18 @@ const updatedLabel = updated.toLocaleDateString('en-GB', {
 
 <BaseLayout title={`${title} — SysViz`} description={description}>
   <div class="flex min-h-screen">
-    <nav class="hidden md:block w-[260px] shrink-0 bg-nav border-r border-line text-nav-ink px-4 py-6 sticky top-0 h-screen overflow-y-auto">
-      <a href={base} class="block font-bold text-white text-[1.05rem] tracking-[.5px]">
-        Sys<span class="text-accent">Viz</span>
-      </a>
+    <nav class="hidden md:block w-[260px] shrink-0 bg-nav border-r border-nav-line text-nav-ink px-4 py-6 sticky top-0 h-screen overflow-y-auto">
+      <div class="flex items-center justify-between">
+        <a href={base} class="block font-bold text-white text-[1.05rem] tracking-[.5px]">
+          Sys<span class="text-nav-accent">Viz</span>
+        </a>
+        <button
+          type="button"
+          data-theme-toggle
+          title="Toggle light / dark theme"
+          class="w-7 h-7 rounded-md border border-nav-line text-nav-ink hover:text-white hover:bg-nav-hover transition-colors cursor-pointer text-xs"
+        ></button>
+      </div>
       <div class="text-xs text-nav-muted mb-5 mt-0.5">{category} · Cheat Sheet</div>
       <a
         href={base}
@@ -50,10 +58,18 @@ const updatedLabel = updated.toLocaleDateString('en-GB', {
     </nav>
 
     <main class="flex-1 min-w-0 max-w-[980px] px-5 py-6 md:px-12 md:py-10 pb-20">
-      <a href={base} class="md:hidden block text-nav-muted text-sm mb-4">← SysViz · All concepts</a>
+      <div class="md:hidden flex items-center justify-between mb-4">
+        <a href={base} class="block text-sub text-sm">← SysViz · All concepts</a>
+        <button
+          type="button"
+          data-theme-toggle
+          title="Toggle light / dark theme"
+          class="w-7 h-7 rounded-md border border-line bg-panel text-sub hover:text-accent-ink transition-colors cursor-pointer text-xs"
+        ></button>
+      </div>
 
       <header class="mb-8">
-        <h1 class="text-white text-[2.1rem] font-bold tracking-tight leading-tight mb-1.5">
+        <h1 class="text-heading text-[2.1rem] font-bold tracking-tight leading-tight mb-1.5">
           {titleHead && `${titleHead} `}<span class="text-accent">{titleTail}</span>
         </h1>
         <p class="text-hero-ink mb-4">{description}</p>
@@ -61,7 +77,7 @@ const updatedLabel = updated.toLocaleDateString('en-GB', {
           {tags.map((tag) => (
             <span class="text-xs text-accent-ink bg-accent-soft border border-accent-line rounded-full px-2.5 py-1">{tag}</span>
           ))}
-          <span class="text-xs text-nav-muted ml-1">Updated {updatedLabel}</span>
+          <span class="text-xs text-sub ml-1">Updated {updatedLabel}</span>
         </div>
       </header>
 
@@ -70,7 +86,7 @@ const updatedLabel = updated.toLocaleDateString('en-GB', {
       </article>
 
       {links.length > 0 && (
-        <footer class="text-nav-muted text-sm text-center pt-5">
+        <footer class="text-sub text-sm text-center pt-5">
           Useful links:{' '}
           {links.map((link, i) => (
             <>

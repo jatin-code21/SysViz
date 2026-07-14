@@ -38,6 +38,8 @@ connect to Chrome.
   scrollIntoView): produce preset keys, `+5 random`, `+ consumer` → status line shows
   "Rebalance!", custom key + Enter, auto-consume drains `lag N` labels over ~2.5s,
   `− consumer` floors at 1 consumer, reset empties partitions.
+- Theme toggle (`[data-theme-toggle]`): default is `light` (paper); click flips
+  `html[data-theme]` + body bg, persists via localStorage across navigation.
 - Mobile (390px): sidebar hidden, back link visible.
 - Unknown slug returns 404 (expected console error in probe).
 
