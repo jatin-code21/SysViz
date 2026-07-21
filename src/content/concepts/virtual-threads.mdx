@@ -1,0 +1,194 @@
+---
+title: Platform vs Virtual Threads
+description: "ExecutorService thread pools vs Java 21 virtual threads — how they differ, when to use each, benefits, pitfalls, and a quick-revision cheat card"
+category: Concurrency
+tags: [java, virtual-threads, concurrency, loom, spring-boot]
+updated: 2026-07-22
+links:
+  - label: JEP 444 — Virtual Threads
+    href: https://openjdk.org/jeps/444
+  - label: Oracle — Virtual Threads Guide
+    href: https://docs.oracle.com/en/java/javase/21/core/virtual-threads.html
+---
+
+import Callout from '../../components/ui/Callout.astro';
+import ThreadModelSimulator from '../../components/viz/virtual-threads/ThreadModelSimulator.tsx';
+
+**The question this page answers:** you already know `ExecutorService` with a fixed thread pool (the ExecutorService page). Java 21 added **virtual threads**. So which do you use, and why? Short version: they solve *different* problems. A thread pool rations expensive OS threads so you don't run out; virtual threads make threads so cheap you stop rationing them. This page is the full comparison — plain-language first, then the technical detail, then a revision card and interview questions.
+
+## The Core Idea in One Minute
+
+A **platform thread** is a thin wrapper over a real **operating-system thread**. It's powerful but expensive: ~1 MB of stack, a few thousand per JVM before things fall over. Because they're scarce, we put them in a **pool** (`ExecutorService`) and share them — that's the whole reason thread pools exist.
+
+A **virtual thread** is a thread managed by the **JVM**, not the OS. It costs ~1 KB and you can have *millions*. The JVM runs many virtual threads on a small set of real OS threads called **carriers**. The magic: when a virtual thread **blocks on I/O** (a database call, an HTTP request), it **unmounts** from its carrier and steps aside, freeing that carrier to run another virtual thread. The blocked thread costs almost nothing while it waits.
+
+<Callout type="tip" title="The one-line mental model">
+  Platform threads: <strong>few, expensive, pooled, shared.</strong> Virtual threads: <strong>many, cheap, one-per-task, thrown away.</strong> You don't replace <code>ExecutorService</code> — you swap what kind of thread it hands out.
+</Callout>
+
+## Why Platform Threads Forced Us to Pool
+
+Before virtual threads, blocking I/O was the enemy. Say each web request calls a database that takes 100 ms. The request thread spends 100 ms **blocked** — doing nothing but holding a whole OS thread hostage.
+
+- Want 10,000 concurrent requests? That's 10,000 blocked OS threads → gigabytes of stack, a thrashing scheduler, and usually `OutOfMemoryError: unable to create native thread`.
+- So instead we cap it: a pool of, say, 200 threads. Now only 200 requests run at once; the other 9,800 **wait in a queue**. Throughput is limited by pool size, and latency hides in the queue.
+- This is the "thread-per-request" model hitting a wall. Every framework tuning guide about pool sizing (the ExecutorService sizing math) exists to manage this exact scarcity.
+
+The painful trade-off: threads block often (I/O is everywhere), but threads are too expensive to have one per blocking operation. Virtual threads dissolve that trade-off.
+
+## What a Virtual Thread Actually Is
+
+Under the hood (Project Loom, shipped in Java 21 as JEP 444):
+
+- A virtual thread is a `Thread` — same `java.lang.Thread` class, same API. Your code, libraries, debuggers, and stack traces all still work.
+- Its call stack lives on the **heap** as a *continuation*, not as a fixed OS stack. It grows and shrinks, which is why it starts at ~1 KB instead of ~1 MB.
+- The JVM has a small **`ForkJoinPool` of carrier threads** (default: one per CPU core). To run, a virtual thread **mounts** onto a carrier; the carrier's OS thread executes it.
+- When the virtual thread hits a **blocking call** (`socket.read()`, JDBC, `Thread.sleep`), the JDK's rewritten blocking code **unmounts** it: the continuation is parked on the heap, the carrier is released, and another ready virtual thread mounts. When the I/O completes, the virtual thread becomes runnable and remounts on *some* carrier to continue.
+- **CPU work does not unmount.** A virtual thread doing pure computation holds its carrier exactly like a platform thread would — because it genuinely needs the CPU.
+
+<Callout type="info" title="So blocking became cheap, not free">
+  Virtual threads don't make I/O faster. They make <em>waiting</em> cheap: a blocked virtual thread occupies no OS thread. That's why you can have a million of them — most are just parked, waiting on I/O, costing a kilobyte each.
+</Callout>
+
+## Watch the Difference — Interactive
+
+Both columns below get the **same** batch of blocking I/O tasks (each ~2 s of waiting). The platform pool runs `poolSize` at a time — the rest queue, because a blocked thread can't be reused. Virtual threads all start at once and their waits overlap. Hit **+24 tasks** with `poolSize` 4 and watch the platform side finish in ~6 waves while the virtual side finishes in one.
+
+<ThreadModelSimulator client:visible />
+
+<ul class="checks">
+  <li>Platform throughput is capped at <code>poolSize</code> — a blocked thread is idle but unavailable.</li>
+  <li>Virtual throughput is capped by the I/O itself, not by thread count — waits happen in parallel.</li>
+  <li>Carriers stay mostly idle: a blocked virtual thread is unmounted, so it holds no carrier.</li>
+  <li>Add more tasks and the gap widens — that's the "thread-per-request wall" versus "one cheap thread per task".</li>
+  <li>For pure CPU work the two columns would tie — virtual threads don't add cores.</li>
+</ul>
+
+## The Same API — Just a Different Executor
+
+The best part: you keep the `ExecutorService` you already know. Only the factory changes.
+
+```java title="Platform pool — the old way"
+// N expensive threads, shared and reused. You must size N.
+try (ExecutorService pool = Executors.newFixedThreadPool(200)) {
+    for (var req : requests) pool.submit(() -> handle(req)); // 201st waits in queue
+}
+```
+
+```java title="Virtual threads — the new way"
+// One cheap thread per task. No pool to size, no queue.
+try (ExecutorService vexec = Executors.newVirtualThreadPerTaskExecutor()) {
+    for (var req : requests) vexec.submit(() -> handle(req)); // 10,000 tasks? fine
+}
+```
+
+Or create one directly, without any executor:
+
+```java title="Direct creation"
+Thread.startVirtualThread(() -> doWork());              // fire and forget
+
+Thread vt = Thread.ofVirtual().name("job-42").unstarted(r);
+Thread pt = Thread.ofPlatform().daemon().start(r);       // explicit platform thread
+```
+
+`handle(req)` is written in the **same simple blocking style** — no callbacks, no reactive operators. That's the point: virtual threads give you async-like scalability while your code stays straight-line and debuggable.
+
+## When to Use Which
+
+The deciding factor is almost always **CPU-bound vs I/O-bound work**.
+
+- **I/O-bound work → virtual threads.** Web request handlers, calling databases/REST APIs/message brokers, fan-out to many services. The thread spends most of its time waiting, and virtual threads make waiting free. This is the 90% case for typical backend services.
+- **CPU-bound work → a bounded platform pool.** Image processing, encryption, parsing, heavy computation. You want *at most `#cores`* threads actually burning CPU; a fixed pool is the right limiter. Virtual threads give no speedup here — you still only have N cores.
+- **Need to limit concurrency → not a pool of virtual threads.** If a fragile downstream allows only 10 concurrent calls, don't pool virtual threads (that defeats them). Use a `Semaphore(10)` around the call, and let each request still run on its own virtual thread.
+- **Still on Java ≤ 17, or a legacy app → platform pools.** Virtual threads need Java 21+. `ExecutorService` isn't going anywhere.
+- **Mixed workload → split them.** Virtual threads for the I/O legs, a small dedicated platform pool for the CPU legs — the same bulkhead thinking as before.
+
+<Callout type="warn" title="Common trap: pooling virtual threads">
+  <code>Executors.newFixedThreadPool(200)</code> but with virtual threads is an anti-pattern — you've re-introduced the 200-task cap you were trying to escape. Virtual threads are meant to be created per task and discarded. Cap <em>resources</em> (a semaphore, a connection pool), never the threads.
+</Callout>
+
+## Benefits & Trade-offs
+
+**What virtual threads win:**
+
+- **Massive scalability for blocking code** — hundreds of thousands of concurrent tasks on a normal JVM.
+- **Simple code** — plain blocking, synchronous style; no reactive/`CompletableFuture` gymnastics to be scalable.
+- **Cheap creation** — no need to pool; `Thread.startVirtualThread` per task is fine.
+- **Better observability** — one thread per task means clean stack traces and thread dumps, unlike reactive pipelines.
+- **Drop-in** — same `Thread`/`ExecutorService` API; most code needs no rewrite.
+
+**What they don't do / cost:**
+
+- **No help for CPU-bound work** — you still have `#cores` of real parallelism.
+- **Not faster I/O** — same latency per call; you just wait concurrently.
+- **Pinning** (below) can occasionally negate the benefit.
+- **`ThreadLocal` at scale** — a million virtual threads each with fat ThreadLocals is a memory footgun; prefer `ScopedValue` (Java 21+ preview) for context.
+- **Ecosystem maturity** — some older libraries use `synchronized` on hot paths or cache platform-thread assumptions; improving fast, but worth testing.
+
+## Pitfalls — Pinning & Friends
+
+- **Pinning** — a virtual thread that blocks **inside a `synchronized` block/method** cannot unmount; it stays "pinned" to its carrier, tying up a real OS thread. Enough pinning and you starve the carriers, losing the whole benefit. The fix in Java 21: replace `synchronized` guarding I/O with `ReentrantLock`. **Java 24 (JEP 491) largely eliminates this** — synchronized no longer pins — but if you're on 21–23, watch for it (`-Djdk.tracePinnedThreads=full`).
+- **Native / JNI blocking** also pins — unavoidable, but rare.
+- **Don't cache thread identity** — virtual threads are ephemeral; keying a cache or lock on the thread object leaks or misbehaves.
+- **CPU-bound tasks on virtual threads** silently hog carriers — they never unmount, so you just get a worse fixed pool. Route computation to a real pool.
+- **Monitor differently** — "thread count" is meaningless when it's a million; watch carrier utilization and task latency instead.
+
+## Common Misconceptions
+
+<ul class="plain">
+  <li><strong>"Virtual threads replace ExecutorService."</strong> No — you still use an <code>ExecutorService</code> (<code>newVirtualThreadPerTaskExecutor</code>). What changes is the thread <em>type</em>, not the API.</li>
+  <li><strong>"They make my app faster."</strong> Only <em>throughput</em> under blocking load. A single request isn't quicker; you just serve far more at once.</li>
+  <li><strong>"They add parallelism / more cores."</strong> No. Real parallelism is still bounded by CPU cores. They add cheap <em>concurrency</em> for waiting.</li>
+  <li><strong>"Pool them for performance."</strong> The opposite — pooling re-caps them. Create per task.</li>
+  <li><strong>"Reactive programming is now pointless."</strong> Virtual threads cover most cases more simply, but reactive still wins for streaming/backpressure-heavy pipelines.</li>
+</ul>
+
+## Quick Revision — Cheat Card
+
+Everything to recall in one glance (great right before an interview):
+
+| | Platform Threads (`ExecutorService` pool) | Virtual Threads (Java 21+) |
+| --- | --- | --- |
+| Managed by | Operating system | JVM (runs on carrier threads) |
+| Cost each | ~1 MB stack, thousands max | ~1 KB heap, millions possible |
+| Usage model | **Pool & share** (scarce) | **One per task, discard** (cheap) |
+| Blocking I/O | Wastes the whole thread | Unmounts → costs nothing |
+| Best for | **CPU-bound** work | **I/O-bound** work |
+| Concurrency limit | `poolSize` | The I/O / downstream, not threads |
+| Code style | Blocking (but capped) | Blocking (and scalable) |
+| Since | Always | Java 21 (JEP 444) |
+
+**The five things to say out loud:**
+
+<ul class="checks">
+  <li>Platform threads are scarce OS threads → we <em>pool</em> them; virtual threads are cheap JVM threads → we make <em>one per task</em>.</li>
+  <li>A blocked virtual thread <em>unmounts</em> from its carrier, so blocking I/O becomes nearly free — that's the entire win.</li>
+  <li>Use virtual threads for <strong>I/O-bound</strong> work, a bounded platform pool for <strong>CPU-bound</strong> work.</li>
+  <li>Same <code>ExecutorService</code> API — just <code>newVirtualThreadPerTaskExecutor()</code>. Don't pool virtual threads.</li>
+  <li>Watch out for <strong>pinning</strong> (blocking inside <code>synchronized</code>) on Java 21–23; fixed in Java 24.</li>
+</ul>
+
+## Spring Boot in One Flag
+
+On Spring Boot 3.2+ with Java 21, you turn on virtual threads for the whole web layer with a single property — Tomcat then handles each request on its own virtual thread:
+
+```properties title="application.properties"
+spring.threads.virtual.enabled=true
+```
+
+Now a controller that blocks on three sequential API calls scales to thousands of concurrent requests without a bigger thread pool. Keep CPU-heavy endpoints on a dedicated bounded executor, and remember the HikariCP connection pool still caps real database concurrency — virtual threads don't remove the need to size *resource* pools, only *thread* pools.
+
+## Interview Questions
+
+1. What is a virtual thread, and how does it differ from a platform thread?
+2. What does "mounting" and "unmounting" mean? When does a virtual thread unmount?
+3. Why do platform threads force us to use thread pools, but virtual threads don't?
+4. Do virtual threads make my application faster? Be precise about throughput vs latency vs parallelism.
+5. When would you still choose a fixed platform thread pool over virtual threads?
+6. Why is pooling virtual threads an anti-pattern? How do you limit concurrency instead?
+7. What is thread pinning, what causes it, and how do you avoid it?
+8. How do you run CPU-bound and I/O-bound work correctly in a virtual-thread app?
+9. Why can `ThreadLocal` be a problem at virtual-thread scale, and what's the alternative?
+10. How do virtual threads change the argument for reactive programming?
+11. How do you enable virtual threads in Spring Boot, and what still needs bounding afterwards?
+12. Do virtual threads change how you size a database connection pool? Why or why not?
